@@ -1,0 +1,47 @@
+# NYEDArch — Not Your Everyday Archive
+# Cargo workspace root.
+#
+# This is Phase 1/2 of the build: the security-critical cryptographic core is
+# implemented and tested first, because per the specification cryptography — not
+# any conditional branch — is the confidentiality boundary. Additional crates
+# (fingerprint, package, runtime-generator, github, platform, ui) are scaffolded
+# in later phases against the invariants this crate establishes.
+[workspace]
+resolver = "2"
+members = [
+    "crates/nyedarch-crypto",
+    "crates/nyedarch-core",
+    "crates/nyedarch-package",
+    "crates/nyedarch-fingerprint",
+    "crates/nyedarch-runtime",
+    "crates/nyedarch-buildtool",
+    "crates/nyedarch-github",
+    "crates/nyedarch-platform",
+    "crates/nyedarch-installer",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "UNLICENSED"
+authors = ["NYEDArch"]
+rust-version = "1.82"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+thiserror = "1"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.2"
+
+# Client hardening (spec §31/§9: anti-RE is a global requirement, not a
+# runtime-only one). The client holds local key material and the capsule
+# generation logic, so it is stripped and link-time optimised like the capsule.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false

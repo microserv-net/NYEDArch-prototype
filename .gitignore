@@ -1,0 +1,11 @@
+# Build output
+/target
+/gui/nyedarch-gui/target
+/release
+
+# Generated capsule projects
+*.partial
+
+# Local artifacts
+*.nyarch
+artifact.zip
