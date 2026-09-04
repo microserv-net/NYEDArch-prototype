@@ -1,0 +1,15 @@
+[package]
+name = "nyedarch-installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# Builder-side only. Never vendored into a capsule.
+[[bin]]
+name = "nyedarch-install"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
