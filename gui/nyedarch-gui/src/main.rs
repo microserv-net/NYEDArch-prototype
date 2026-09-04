@@ -1,0 +1,2117 @@
+//! NYEDArch desktop client.
+//!
+//! A stepped workflow -- Source, Protections, Machines, Targets, Build, Run --
+//! with a persistent navigation rail, a menu bar for the actions that do not
+//! belong in the flow, and a posture meter that reacts as protections change.
+//!
+//! Behaviour is unchanged from the command-line client it mirrors: machine and
+//! passphrase protections are mandatory and cannot be switched off, the creator
+//! fingerprint is always captured and included, and a dropped capsule is
+//! launched through `nyedarch_core::launch` as an independent process that
+//! performs its own authorization.
+
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+mod theme;
+mod widgets;
+
+use eframe::egui;
+use egui::{pos2, vec2, Align2, Color32, Rect, Rounding, Sense, Stroke};
+
+use std::sync::mpsc::{channel, Receiver, Sender};
+
+use nyedarch_buildtool::{seal_and_generate, runtime_source_root, SealRequest, Stage};
+
+use theme as t;
+use widgets as w;
+
+
+/// Parse "HH:MM" into minutes past midnight.
+fn parse_hhmm(s: &str) -> Option<u32> {
+    let (h, m) = s.trim().split_once(':')?;
+    let h: u32 = h.trim().parse().ok()?;
+    let m: u32 = m.trim().parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some(h * 60 + m)
+}
+
+// ------------------------------------------------------------------ state ---
+
+/// Progress from the sealing worker. Every variant corresponds to real work.
+enum BuildMsg {
+    Stage(Stage),
+    Note(String),
+    Done {
+        project: std::path::PathBuf,
+        bytes: usize,
+        machines: usize,
+        nonce: u64,
+    },
+    Failed(String),
+}
+
+
+#[derive(PartialEq, Clone, Copy, Debug)]
+enum Step {
+    Source,
+    Protections,
+    Machines,
+    Targets,
+    Build,
+    Run,
+}
+
+impl Step {
+    const ALL: [Step; 6] = [
+        Step::Source,
+        Step::Protections,
+        Step::Machines,
+        Step::Targets,
+        Step::Build,
+        Step::Run,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Step::Source => "Source",
+            Step::Protections => "Protections",
+            Step::Machines => "Machines",
+            Step::Targets => "Targets",
+            Step::Build => "Build",
+            Step::Run => "Run capsule",
+        }
+    }
+    fn hint(self) -> &'static str {
+        match self {
+            Step::Source => "What to protect",
+            Step::Protections => "How it unlocks",
+            Step::Machines => "Where it opens",
+            Step::Targets => "Which platforms",
+            Step::Build => "Create the capsule",
+            Step::Run => "Open a capsule",
+        }
+    }
+    fn index(self) -> usize {
+        Step::ALL.iter().position(|s| *s == self).unwrap_or(0)
+    }
+}
+
+/// Which modal panel, if any, is open.
+#[derive(PartialEq, Clone, Copy)]
+enum Modal {
+    None,
+    Eula,
+    About,
+    Shortcuts,
+}
+
+struct Protections {
+    machine: bool,
+    passphrase: bool,
+    location: bool,
+    location_tolerance_m: u32,
+    time: bool,
+    time_of_day: String,
+    time_tolerance_min: u32,
+    one_shot: bool,
+}
+
+impl Default for Protections {
+    fn default() -> Self {
+        // Machine and passphrase are always on. They exist as fields for
+        // rendering only; nothing in the interface can clear them.
+        Self {
+            machine: true,
+            passphrase: true,
+            location: false,
+            location_tolerance_m: 150,
+            time: false,
+            time_of_day: "14:00".to_string(),
+            time_tolerance_min: 15,
+            one_shot: false,
+        }
+    }
+}
+
+
+struct App {
+    step: Step,
+    step_changed_at: f64,
+    modal: Modal,
+
+    source_path: String,
+    passphrase: String,
+    protections: Protections,
+
+    private_repo: bool,
+    /// GitHub credentials. The token is held in memory for this session only
+    /// and is never written to disk by NYEDArch.
+    gh_owner: String,
+    gh_repo: String,
+    gh_token: String,
+    /// Whether to dispatch the remote build after sealing.
+    remote_build: bool,
+    target_windows: bool,
+    target_macos: bool,
+    target_linux: bool,
+
+    log: Vec<(f64, String)>,
+    building: bool,
+    build_progress: f32,
+    /// Where the sealed capsule project was written, once it exists.
+    built_project: Option<std::path::PathBuf>,
+    /// Progress and completion from the worker thread. Sealing runs off the UI
+    /// thread because Argon2id is deliberately slow and would freeze the window.
+    build_rx: Option<Receiver<BuildMsg>>,
+
+    dropped_capsule: Option<std::path::PathBuf>,
+    run_out_dir: String,
+    run_status: String,
+    run_ok: bool,
+
+    /// Machine selector state (spec §48): free-text search, selected tags, and
+    /// whether tags combine with ANY or ALL.
+    /// Compression effort (spec §16) and creator mode (spec §50).
+    compression: nyedarch_package::pipeline::CompressionMode,
+    creator_mode: bool,
+    /// Set to cancel an in-flight build (spec §61).
+    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Creator-mode diagnostics from the last build.
+    pending_diagnostics: Vec<String>,
+    machine_query: String,
+    selected_tags: Vec<String>,
+    tag_mode_all: bool,
+    toast: Option<(String, f64, Color32)>,
+    /// The licence must be accepted before the application can be used
+    /// (spec §13). This gates the whole window, not just a menu item.
+    eula_accepted: bool,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        // The creator machine is always trusted and always included.
+        // Capturing here confirms the fingerprint engine works before the user
+        // reaches the Machines step; the registry reports the live value.
+        let _ = nyedarch_fingerprint::capture();
+        Self {
+            step: Step::Source,
+            step_changed_at: 0.0,
+            modal: Modal::None,
+            source_path: String::new(),
+            passphrase: String::new(),
+            protections: Protections::default(),
+            private_repo: true,
+            // Pre-fill from the environment if present, exactly as the CLI does.
+            gh_owner: String::new(),
+            gh_repo: "nyedarch-builds".to_string(),
+            gh_token: std::env::var("NYEDARCH_GITHUB_TOKEN")
+                .or_else(|_| std::env::var("GITHUB_TOKEN"))
+                .unwrap_or_default(),
+            remote_build: true,
+            target_windows: false,
+            target_macos: false,
+            target_linux: true,
+            log: {
+                let mut l = vec![(0.0, "Ready. Choose what to protect.".to_string())];
+                // Same client anti-analysis check the CLI runs.
+                if let Some(w) = nyedarch_buildtool::harden::startup_check() {
+                    l.push((0.0, w.to_string()));
+                }
+                if let Some(w) = nyedarch_buildtool::keystore::current_source()
+                    .and_then(|s| s.warning())
+                {
+                    l.push((0.0, w.to_string()));
+                }
+                l
+            },
+            building: false,
+            build_progress: 0.0,
+            built_project: None,
+            build_rx: None,
+            dropped_capsule: None,
+            run_out_dir: String::new(),
+            run_status: String::new(),
+            run_ok: false,
+            compression: nyedarch_package::pipeline::CompressionMode::Automatic,
+            creator_mode: false,
+            cancel_flag: None,
+            pending_diagnostics: Vec::new(),
+            machine_query: String::new(),
+            selected_tags: Vec::new(),
+            tag_mode_all: false,
+            toast: None,
+            eula_accepted: nyedarch_buildtool::eula::already_accepted(),
+        }
+    }
+}
+
+impl App {
+    fn active_protections(&self) -> usize {
+        2 + self.protections.location as usize + self.protections.time as usize
+    }
+
+    fn step_done(&self, s: Step) -> bool {
+        match s {
+            Step::Source => !self.source_path.trim().is_empty(),
+            Step::Protections => !self.passphrase.is_empty(),
+            Step::Machines => true, // the creator machine is always trusted
+            Step::Targets => self.target_windows || self.target_macos || self.target_linux,
+            Step::Build => self.build_progress >= 1.0,
+            Step::Run => self.run_ok,
+        }
+    }
+
+    fn selected_targets(&self) -> Vec<nyedarch_github::Target> {
+        let mut v = Vec::new();
+        if self.target_linux {
+            v.push(nyedarch_github::Target::LinuxGnu);
+        }
+        if self.target_windows {
+            v.push(nyedarch_github::Target::WindowsMsvc);
+        }
+        if self.target_macos {
+            v.push(nyedarch_github::Target::MacosAppleSilicon);
+        }
+        v
+    }
+
+    fn ready_to_build(&self) -> bool {
+        self.step_done(Step::Source) && self.step_done(Step::Protections) && self.step_done(Step::Targets)
+    }
+
+    fn goto(&mut self, s: Step, now: f64) {
+        if s != self.step {
+            self.step = s;
+            self.step_changed_at = now;
+        }
+    }
+
+    fn say(&mut self, now: f64, msg: impl Into<String>) {
+        self.log.push((now, msg.into()));
+        if self.log.len() > 200 {
+            self.log.remove(0);
+        }
+    }
+
+    fn toast(&mut self, now: f64, msg: impl Into<String>, colour: Color32) {
+        self.toast = Some((msg.into(), now, colour));
+    }
+
+    // ---------------------------------------------------------- actions ----
+
+    /// Open a native folder chooser. This is a real dialog, not a placeholder:
+    /// without it the source field could only be typed into, which was the
+    /// defect this replaces.
+    fn pick_source_folder(&mut self, now: f64) {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose a folder to protect");
+        if let Some(cur) = std::path::Path::new(self.source_path.trim()).parent() {
+            if cur.is_dir() {
+                dialog = dialog.set_directory(cur);
+            }
+        }
+        match dialog.pick_folder() {
+            Some(p) => {
+                self.say(now, format!("Source set to {}", p.display()));
+                self.source_path = p.to_string_lossy().to_string();
+                self.toast(now, "Source selected", t::CYAN);
+            }
+            None => self.say(now, "Folder selection cancelled."),
+        }
+    }
+
+    fn pick_source_file(&mut self, now: f64) {
+        match rfd::FileDialog::new()
+            .set_title("Choose a file to protect")
+            .pick_file()
+        {
+            Some(p) => {
+                self.say(now, format!("Source set to {}", p.display()));
+                self.source_path = p.to_string_lossy().to_string();
+                self.toast(now, "Source selected", t::CYAN);
+            }
+            None => self.say(now, "File selection cancelled."),
+        }
+    }
+
+    fn pick_output_dir(&mut self, now: f64) {
+        if let Some(p) = rfd::FileDialog::new()
+            .set_title("Choose where to extract")
+            .pick_folder()
+        {
+            self.run_out_dir = p.to_string_lossy().to_string();
+            self.say(now, format!("Extract target set to {}", p.display()));
+        }
+    }
+
+    fn pick_capsule(&mut self, now: f64) {
+        match rfd::FileDialog::new()
+            .set_title("Open a NYEDArch capsule")
+            .add_filter("NYEDArch capsule", &["nyarch"])
+            .pick_file()
+        {
+            Some(p) => {
+                self.goto(Step::Run, now);
+                match nyedarch_core::launch::validate(&p) {
+                    Ok(()) => {
+                        self.run_status.clear();
+                        self.run_ok = false;
+                        self.say(now, format!("Loaded {}", p.display()));
+                        self.toast(now, "Capsule ready", t::MINT);
+                        self.dropped_capsule = Some(p);
+                    }
+                    Err(e) => {
+                        self.dropped_capsule = None;
+                        self.run_status = format!("Cannot run that file: {e}");
+                        self.toast(now, "Not a capsule", t::CORAL);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn import_machine(&mut self, now: f64) {
+        if let Some(p) = rfd::FileDialog::new()
+            .set_title("Import a trusted machine record")
+            .add_filter("NYEDArch fingerprint", &["nyfp"])
+            .pick_file()
+        {
+            // Verification happens inside the registry, so both clients apply
+            // exactly the same check. A record that fails is refused outright.
+            match nyedarch_buildtool::machines::import(&p) {
+                Ok(m) => {
+                    self.say(
+                        now,
+                        format!("Imported machine {} labels={:?}", &m.id[..16.min(m.id.len())], m.labels),
+                    );
+                    self.toast(now, "Machine verified and added", t::MINT);
+                    self.goto(Step::Machines, now);
+                }
+                Err(e) => {
+                    for line in e.lines() {
+                        self.say(now, line.to_string());
+                    }
+                    self.toast(now, "Record refused", t::CORAL);
+                }
+            }
+        }
+    }
+
+    fn export_machine(&mut self, now: f64) {
+        if let Some(p) = rfd::FileDialog::new()
+            .set_title("Export this machine")
+            .set_file_name("this-machine.nyfp")
+            .add_filter("NYEDArch fingerprint", &["nyfp"])
+            .save_file()
+        {
+            match nyedarch_buildtool::machines::export_this_machine(
+                &p,
+                vec!["exported".to_string()],
+            ) {
+                Ok(id) => {
+                    self.say(now, format!("Exported {} to {}", &id[..16.min(id.len())], p.display()));
+                    self.say(now, "The record is authenticated; editing it invalidates it.");
+                    self.toast(now, "Machine exported", t::MINT);
+                }
+                Err(e) => {
+                    self.say(now, format!("Export failed: {e}"));
+                    self.toast(now, "Export failed", t::CORAL);
+                }
+            }
+        }
+    }
+
+    /// Apply the chosen visibility to the build repository now, without waiting
+    /// for the next build. Mirrors `nyedarch visibility` in the CLI.
+    fn apply_visibility(&mut self, now: f64) {
+        if self.gh_owner.trim().is_empty() || self.gh_repo.trim().is_empty() {
+            self.say(now, "Set the GitHub owner and repository first.");
+            self.toast(now, "GitHub details missing", t::CORAL);
+            return;
+        }
+        let token = if self.gh_token.trim().is_empty() { None } else { Some(self.gh_token.trim().to_string()) };
+        match nyedarch_buildtool::remote::set_repository_visibility(
+            token,
+            self.gh_owner.trim(),
+            self.gh_repo.trim(),
+            self.private_repo,
+        ) {
+            Ok(()) => {
+                let word = if self.private_repo { "private" } else { "PUBLIC" };
+                self.say(now, format!("{}/{} is now {word}.", self.gh_owner.trim(), self.gh_repo.trim()));
+                if !self.private_repo {
+                    self.say(now, "A public repository exposes your build logs and workflow to anyone.");
+                    self.say(now, "The capsule source stays encrypted either way; the key remains a repository secret.");
+                }
+                self.toast(now, format!("Repository is {word}"), if self.private_repo { t::MINT } else { t::CORAL });
+            }
+            Err(e) => {
+                for line in e.lines() {
+                    self.say(now, line.to_string());
+                }
+                self.toast(now, "Visibility unchanged", t::CORAL);
+            }
+        }
+    }
+
+    /// Start a real seal on a worker thread.
+    ///
+    /// Nothing here is simulated: this is the same `seal_and_generate` the
+    /// command-line client runs, and the progress bar advances only when the
+    /// pipeline reports a stage.
+    fn start_build(&mut self, now: f64) {
+        if self.building {
+            return;
+        }
+        let source = std::path::PathBuf::from(self.source_path.trim());
+        if !source.exists() {
+            self.say(now, format!("Source does not exist: {}", source.display()));
+            self.toast(now, "Source not found", t::CORAL);
+            return;
+        }
+
+        let default_name = format!(
+            "{}-capsule",
+            source.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "nyedarch".into())
+        );
+        let project_dir = match rfd::FileDialog::new()
+            .set_title("Where should the capsule project be created?")
+            .set_file_name(&default_name)
+            .save_file()
+        {
+            Some(p) => p,
+            None => {
+                self.say(now, "Build cancelled: no output location chosen.");
+                return;
+            }
+        };
+
+        let schedule = if self.protections.time {
+            match parse_hhmm(&self.protections.time_of_day) {
+                Some(mins) => Some(nyedarch_crypto::timewin::DailySchedule {
+                    slots_minutes: vec![mins],
+                    tolerance_minutes: self.protections.time_tolerance_min,
+                    tz_offset_minutes: 0,
+                }),
+                None => {
+                    self.say(now, "Time must be HH:MM.");
+                    self.toast(now, "Invalid time", t::CORAL);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        // Machines selected in the Machines step, resolved through the shared
+        // registry so the GUI and CLI trust exactly the same set.
+        let mode = if self.tag_mode_all {
+            nyedarch_buildtool::machines::TagMode::All
+        } else {
+            nyedarch_buildtool::machines::TagMode::Any
+        };
+        let trust_files: Vec<std::path::PathBuf> =
+            nyedarch_buildtool::machines::select(&self.machine_query, &self.selected_tags, mode)
+                .into_iter()
+                .filter(|m| !m.is_this_machine && !m.path.as_os_str().is_empty())
+                .map(|m| m.path)
+                .collect();
+
+        // Cancellation flag, shared with the worker (spec §61).
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let req = SealRequest {
+            source,
+            project_dir: project_dir.clone(),
+            passphrase: self.passphrase.clone(),
+            location_tolerance_m: if self.protections.location {
+                Some(self.protections.location_tolerance_m)
+            } else {
+                None
+            },
+            schedule,
+            one_shot: self.protections.one_shot,
+            trust_files,
+            argon: nyedarch_crypto::Argon2Params { m_cost: 64 * 1024, t_cost: 2, p_cost: 1 },
+            compression: self.compression,
+            cancelled: cancel.clone(),
+            creator_mode: self.creator_mode,
+            // The desktop client prefers hardware and reports any downgrade;
+            // `--hardware required` is available on the command line for builds
+            // that must not proceed without it.
+            hardware: nyedarch_platform::hardware::HardwarePolicy::Preferred,
+        };
+
+        let remote = if self.remote_build {
+            if self.gh_token.trim().is_empty() || self.gh_owner.trim().is_empty() {
+                self.say(now, "Remote build is on but the GitHub owner or token is missing.");
+                self.say(now, "Set them under Targets, or turn remote build off to build locally.");
+                self.toast(now, "GitHub details missing", t::CORAL);
+                return;
+            }
+            Some((
+                self.gh_owner.trim().to_string(),
+                self.gh_repo.trim().to_string(),
+                self.gh_token.trim().to_string(),
+                self.private_repo,
+                self.selected_targets(),
+            ))
+        } else {
+            None
+        };
+
+        let (tx, rx): (Sender<BuildMsg>, Receiver<BuildMsg>) = channel();
+        self.build_rx = Some(rx);
+        self.cancel_flag = Some(cancel.clone());
+        self.building = true;
+        self.build_progress = 0.0;
+        self.built_project = None;
+        self.say(now, "Starting seal.");
+
+        std::thread::spawn(move || {
+            let roots = runtime_source_root();
+            let tx2 = tx.clone();
+            let result = seal_and_generate(&req, &roots, move |stage| {
+                let _ = tx2.send(BuildMsg::Stage(stage));
+            });
+            match result {
+                Ok(o) => {
+                    if let Some((owner, repo, token, private, targets)) = remote {
+                        let _ = tx.send(BuildMsg::Note(
+                            "Dispatching remote build on GitHub Actions.".to_string(),
+                        ));
+                        let ra = nyedarch_buildtool::remote::RemoteBuildArgs {
+                            token: Some(token),
+                            owner: &owner,
+                            repo: &repo,
+                            private,
+                            targets,
+                            project_dir: &o.project_dir,
+                            build_id: nyedarch_core::Ulid::new().to_string(),
+                            package_commitment: o.package_commitment,
+                            runtime_commitment: o.runtime_commitment,
+                        };
+                        let tx3 = tx.clone();
+                        match nyedarch_buildtool::remote::run_remote_build_with(&ra, move |m| {
+                            let _ = tx3.send(BuildMsg::Note(m));
+                        }) {
+                            Ok(run) => {
+                                let _ = tx.send(BuildMsg::Note(format!(
+                                    "Remote build dispatched, workflow run {run}."
+                                )));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(BuildMsg::Note(format!("Remote build failed: {e}")));
+                                let _ = tx.send(BuildMsg::Note(
+                                    "The capsule project was still written; you can build it locally."
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    for w in &o.warnings {
+                        let _ = tx.send(BuildMsg::Note(format!("warning: {w}")));
+                    }
+                    for d in &o.diagnostics {
+                        let _ = tx.send(BuildMsg::Note(format!("  {d}")));
+                    }
+                    let _ = tx.send(BuildMsg::Done {
+                        project: o.project_dir,
+                        bytes: o.package_bytes,
+                        machines: o.trusted_machines,
+                        nonce: o.build_nonce,
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BuildMsg::Failed(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// Drain worker messages each frame.
+    fn poll_build(&mut self, now: f64) {
+        let mut msgs = Vec::new();
+        if let Some(rx) = &self.build_rx {
+            while let Ok(m) = rx.try_recv() {
+                msgs.push(m);
+            }
+        }
+        for m in msgs {
+            match m {
+                BuildMsg::Stage(s) => {
+                    self.build_progress = s.progress();
+                    self.say(now, s.message());
+                }
+                BuildMsg::Note(m) => self.say(now, m),
+                BuildMsg::Done { project, bytes, machines, nonce } => {
+                    self.building = false;
+                    self.cancel_flag = None;
+                    self.build_progress = 1.0;
+                    self.built_project = Some(project.clone());
+                    self.build_rx = None;
+                    self.say(now, format!("Sealed {bytes} bytes for {machines} machine(s), build {nonce:016x}."));
+                    self.say(now, format!("Capsule project written to {}", project.display()));
+                    for d in std::mem::take(&mut self.pending_diagnostics) {
+                        self.say(now, format!("  {d}"));
+                    }
+                    self.toast(now, "Capsule project created", t::MINT);
+                }
+                BuildMsg::Failed(e) => {
+                    self.building = false;
+                    self.cancel_flag = None;
+                    self.build_progress = 0.0;
+                    self.build_rx = None;
+                    for line in e.lines() {
+                        self.say(now, line.to_string());
+                    }
+                    self.toast(now, "Build failed", t::CORAL);
+                }
+            }
+        }
+    }
+
+    fn reset(&mut self, now: f64) {
+        // The trusted machine registry is on disk and survives a reset; only
+        // the in-progress capsule is cleared.
+        *self = App {
+            step_changed_at: now,
+            ..App::default()
+        };
+        self.say(now, "New capsule started.");
+    }
+}
+
+// -------------------------------------------------------------- menu bar ----
+
+impl App {
+    fn menu_bar(&mut self, ctx: &egui::Context, now: f64) {
+        egui::TopBottomPanel::top("menubar")
+            .exact_height(34.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(t::RAIL)
+                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+            )
+            .show(ctx, |ui| {
+                // Hairline under the bar keeps it visually attached to the rail.
+                let r = ui.max_rect();
+                ui.painter().line_segment(
+                    [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
+                    Stroke::new(1.0, t::EDGE),
+                );
+
+                egui::menu::bar(ui, |ui| {
+                    // Capsule: the object this application exists to make.
+                    ui.menu_button("Capsule", |ui| {
+                        if ui.button("New capsule").clicked() {
+                            self.reset(now);
+                            ui.close_menu();
+                        }
+                        if ui.button("Choose folder to protect...").clicked() {
+                            self.pick_source_folder(now);
+                            ui.close_menu();
+                        }
+                        if ui.button("Choose file to protect...").clicked() {
+                            self.pick_source_file(now);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Open capsule to run...").clicked() {
+                            self.pick_capsule(now);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Quit").clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    });
+
+                    // Machines: import and export live here rather than being
+                    // buried in a step, since they are used between sessions.
+                    ui.menu_button("Machines", |ui| {
+                        if ui.button("Import trusted machine (.nyfp)...").clicked() {
+                            self.import_machine(now);
+                            ui.close_menu();
+                        }
+                        if ui.button("Export this machine (.nyfp)...").clicked() {
+                            self.export_machine(now);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Recapture this machine").clicked() {
+                            // The registry always reports the live fingerprint,
+                            // so this simply reports what it now is.
+                            let fp = nyedarch_fingerprint::capture();
+                            self.say(now, format!("This machine is {}", &fp.id_hex()[..16]));
+                            self.toast(now, "Fingerprint recaptured", t::MINT);
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Protections: quick toggles mirroring the step, so they can
+                    // be reached without navigating.
+                    ui.menu_button("Protections", |ui| {
+                        ui.add_enabled(false, egui::Button::new("Machine  (always on)"));
+                        ui.add_enabled(false, egui::Button::new("Passphrase  (always on)"));
+                        ui.separator();
+                        if ui
+                            .checkbox(&mut self.protections.location, "Location")
+                            .clicked()
+                        {
+                            self.step_changed_at = now;
+                        }
+                        ui.checkbox(&mut self.protections.time, "Time window");
+                        ui.separator();
+                        if ui
+                            .checkbox(&mut self.protections.one_shot, "One-shot capsule")
+                            .clicked()
+                            && self.protections.one_shot
+                        {
+                            self.toast(now, "Deletion cannot be guaranteed on SSDs", t::CORAL);
+                        }
+                    });
+
+                    // Build: the action, plus where it happens.
+                    ui.menu_button("Build", |ui| {
+                        let ready = self.ready_to_build() && !self.building;
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Build capsule"))
+                            .clicked()
+                        {
+                            self.goto(Step::Build, now);
+                            self.start_build(now);
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut self.target_linux, "Target: Linux");
+                        ui.checkbox(&mut self.target_windows, "Target: Windows");
+                        ui.checkbox(&mut self.target_macos, "Target: macOS");
+                        ui.separator();
+                        ui.checkbox(&mut self.private_repo, "Private repository");
+                    });
+
+                    // Help: licence and reference material.
+                    ui.menu_button("Help", |ui| {
+                        if ui.button("End User Licence Agreement").clicked() {
+                            self.modal = Modal::Eula;
+                            ui.close_menu();
+                        }
+                        if ui.button("Keyboard shortcuts").clicked() {
+                            self.modal = Modal::Shortcuts;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("About NYEDArch").clicked() {
+                            self.modal = Modal::About;
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Right-aligned live status.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (label, colour) = if self.building {
+                            ("building", t::CYAN)
+                        } else if self.build_progress >= 1.0 {
+                            ("sealed", t::MINT)
+                        } else {
+                            ("idle", t::MUTED)
+                        };
+                        let p = ui.cursor().min + vec2(-72.0, 4.0);
+                        w::pill(ui, p, label, colour);
+                        ui.add_space(78.0);
+                    });
+                });
+            });
+    }
+}
+
+// ------------------------------------------------------------------- rail ---
+
+impl App {
+    fn rail(&mut self, ctx: &egui::Context, now: f64) {
+        egui::SidePanel::left("rail")
+            .exact_width(236.0)
+            .resizable(false)
+            .frame(egui::Frame::none().fill(t::RAIL).inner_margin(egui::Margin {
+                left: 12.0,
+                right: 12.0,
+                top: 16.0,
+                bottom: 12.0,
+            }))
+            .show(ctx, |ui| {
+                // Wordmark with the aperture.
+                let (logo_rect, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
+                let open = self.active_protections() as f32 / 4.0;
+                w::aperture(
+                    ui,
+                    pos2(logo_rect.left() + 23.0, logo_rect.center().y),
+                    44.0,
+                    now,
+                    1.0 - open * 0.8,
+                    self.building,
+                );
+                ui.painter().text(
+                    pos2(logo_rect.left() + 52.0, logo_rect.center().y - 9.0),
+                    Align2::LEFT_CENTER,
+                    "NYEDArch",
+                    t::font(19.0),
+                    t::TEXT,
+                );
+                ui.painter().text(
+                    pos2(logo_rect.left() + 52.0, logo_rect.center().y + 10.0),
+                    Align2::LEFT_CENTER,
+                    "Not Your Everyday Archive",
+                    t::font(t::MICRO),
+                    t::MUTED,
+                );
+
+                ui.add_space(12.0);
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+                ui.painter().rect_filled(r, Rounding::ZERO, t::EDGE);
+                ui.add_space(10.0);
+
+                // Sliding active indicator, painted before the items.
+                let first_y = ui.cursor().top();
+                let item_h = 50.0 + ui.spacing().item_spacing.y;
+                let target_y = first_y + self.step.index() as f32 * item_h;
+                let y = ui
+                    .ctx()
+                    .animate_value_with_time(egui::Id::new("rail_ind"), target_y, 0.22);
+                let ind = Rect::from_min_size(pos2(ui.min_rect().left() - 8.0, y + 9.0), vec2(3.0, 32.0));
+                ui.painter().rect_filled(ind, Rounding::same(2.0), t::CYAN);
+                w::glow(ui, ind.center(), 20.0, t::CYAN, 0.4);
+
+                let mut clicked = None;
+                for (i, s) in Step::ALL.iter().enumerate() {
+                    let done = self.step_done(*s) && *s != self.step;
+                    if w::nav_item(ui, i, s.label(), s.hint(), *s == self.step, done).clicked() {
+                        clicked = Some(*s);
+                    }
+                }
+                if let Some(s) = clicked {
+                    self.goto(s, now);
+                }
+
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("protections engaged")
+                            .size(t::MICRO)
+                            .color(t::MUTED),
+                    );
+                    ui.add_space(2.0);
+                    w::posture_meter(ui, 104.0, self.active_protections(), 4, now);
+                });
+            });
+    }
+}
+
+// ------------------------------------------------------------------ views ---
+
+impl App {
+    fn view_source(&mut self, ui: &mut egui::Ui, now: f64) {
+        w::section_title(
+            ui,
+            "What are you protecting?",
+            "A capsule carries your data, the rules for opening it, and its own extraction logic.",
+        );
+
+        let mut want_folder = false;
+        let mut want_file = false;
+        w::glass_card(
+            ui,
+            "src",
+            126.0,
+            t::CYAN,
+            !self.source_path.is_empty(),
+            false,
+            |ui, _r, _l| {
+                ui.label(egui::RichText::new("SOURCE").size(t::MICRO).color(t::MUTED));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let w = ui.available_width() - 210.0;
+                    ui.add_sized(
+                        vec2(w.max(120.0), 32.0),
+                        egui::TextEdit::singleline(&mut self.source_path)
+                            .hint_text("choose a folder or file")
+                            .margin(vec2(10.0, 7.0)),
+                    );
+                    if w::ghost_button(ui, "pickdir", "Folder...", 96.0).clicked() {
+                        want_folder = true;
+                    }
+                    if w::ghost_button(ui, "pickfile", "File...", 88.0).clicked() {
+                        want_file = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Directory structure, permissions and symlinks are preserved.",
+                    )
+                    .size(t::MICRO)
+                    .color(t::MUTED),
+                );
+            },
+        );
+        if want_folder {
+            self.pick_source_folder(now);
+        }
+        if want_file {
+            self.pick_source_file(now);
+        }
+
+        ui.add_space(14.0);
+
+        let cards = [
+            ("Sealed", "Compressed and encrypted in bounded chunks. Nothing plaintext is written.", t::VIOLET),
+            ("Bound", "Tied to this build. A payload cannot be moved into another capsule.", t::CYAN),
+            ("Standalone", "No reader, no server, no network. The capsule carries everything.", t::MINT),
+        ];
+        let cw = (ui.available_width() - 20.0) / 3.0;
+        ui.horizontal(|ui| {
+            for (i, (title, body, accent)) in cards.iter().enumerate() {
+                let (rect, _) = ui.allocate_exact_size(vec2(cw, 104.0), Sense::hover());
+                ui.painter()
+                    .rect(rect, t::card_rounding(), t::alpha(t::GLASS, 0.85), t::hairline());
+                let bar = Rect::from_min_size(rect.min + vec2(16.0, 16.0), vec2(24.0, 3.0));
+                ui.painter().rect_filled(bar, Rounding::same(2.0), *accent);
+                ui.painter().text(
+                    rect.min + vec2(16.0, 28.0),
+                    Align2::LEFT_TOP,
+                    *title,
+                    t::font(t::H_SECTION),
+                    t::TEXT,
+                );
+                let galley =
+                    ui.painter()
+                        .layout(body.to_string(), t::font(t::SMALL), t::TEXT_DIM, cw - 32.0);
+                ui.painter().galley(rect.min + vec2(16.0, 52.0), galley, t::TEXT_DIM);
+                if i < 2 {
+                    ui.add_space(10.0 - ui.spacing().item_spacing.x);
+                }
+            }
+        });
+    }
+
+    fn view_protections(&mut self, ui: &mut egui::Ui, now: f64) {
+        w::section_title(
+            ui,
+            "Protections",
+            "Every enabled protection must pass. Any one failing means the capsule stays shut.",
+        );
+
+        let mut machine = self.protections.machine;
+        w::glass_card(ui, "p_machine", 84.0, t::MINT, true, false, |ui, rect, _l| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Machine").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(
+                        egui::RichText::new("Opens only on trusted machines. Cannot be disabled.")
+                            .size(t::SMALL)
+                            .color(t::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    w::protection_switch(ui, "sw_machine", &mut machine, true);
+                });
+            });
+            w::pill(ui, pos2(rect.left() + 100.0, rect.top() + 14.0), "always on", t::MINT);
+        });
+
+        ui.add_space(8.0);
+        let mut pass_on = self.protections.passphrase;
+        w::glass_card(ui, "p_pass", 122.0, t::MINT, true, false, |ui, rect, _l| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Passphrase").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(
+                        egui::RichText::new("Memory-hard Argon2id with a per-capsule salt.")
+                            .size(t::SMALL)
+                            .color(t::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    w::protection_switch(ui, "sw_pass", &mut pass_on, true);
+                });
+            });
+            w::pill(ui, pos2(rect.left() + 132.0, rect.top() + 14.0), "always on", t::MINT);
+            ui.add_space(8.0);
+            ui.add_sized(
+                vec2(ui.available_width(), 32.0),
+                egui::TextEdit::singleline(&mut self.passphrase)
+                    .password(true)
+                    .hint_text("choose a strong passphrase")
+                    .margin(vec2(10.0, 7.0)),
+            );
+        });
+
+        ui.add_space(16.0);
+        ui.label(egui::RichText::new("OPTIONAL").size(t::MICRO).color(t::MUTED));
+        ui.add_space(6.0);
+
+        let mut loc = self.protections.location;
+        let loc_h = if loc { 130.0 } else { 84.0 };
+        w::glass_card(ui, "p_loc", loc_h, t::CYAN, loc, false, |ui, _r, _l| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Location").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(
+                        egui::RichText::new("Acquired automatically. A vague fix is refused.")
+                            .size(t::SMALL)
+                            .color(t::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    w::protection_switch(ui, "sw_loc", &mut loc, false);
+                });
+            });
+            if loc {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Within").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.add(
+                        egui::Slider::new(&mut self.protections.location_tolerance_m, 25..=1000)
+                            .suffix(" m")
+                            .trailing_fill(true),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new("A reading less accurate than this is refused, not accepted.")
+                        .size(t::MICRO)
+                        .color(t::MUTED),
+                );
+            }
+        });
+        self.protections.location = loc;
+
+        ui.add_space(8.0);
+        let mut tm = self.protections.time;
+        let time_h = if tm { 140.0 } else { 84.0 };
+        w::glass_card(ui, "p_time", time_h, t::CYAN, tm, false, |ui, _r, _l| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("Time window").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(
+                        egui::RichText::new("A recurring daily window the capsule checks itself.")
+                            .size(t::SMALL)
+                            .color(t::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    w::protection_switch(ui, "sw_time", &mut tm, false);
+                });
+            });
+            if tm {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("At").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.add_sized(
+                        vec2(74.0, 28.0),
+                        egui::TextEdit::singleline(&mut self.protections.time_of_day)
+                            .margin(vec2(8.0, 5.0)),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("give or take").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.add(
+                        egui::DragValue::new(&mut self.protections.time_tolerance_min)
+                            .clamp_range(1..=180)
+                            .suffix(" min"),
+                    );
+                });
+                ui.label(
+                    egui::RichText::new("Recurring, not an expiry: this repeats every day.")
+                        .size(t::MICRO)
+                        .color(t::MUTED),
+                );
+            }
+        });
+        self.protections.time = tm;
+
+        ui.add_space(8.0);
+        let mut one = self.protections.one_shot;
+        w::glass_card(ui, "p_shot", 84.0, t::CORAL, one, false, |ui, _r, _l| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new("One-shot capsule").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(
+                        egui::RichText::new("Best-effort self-delete after a verified extraction.")
+                            .size(t::SMALL)
+                            .color(t::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    w::protection_switch(ui, "sw_shot", &mut one, false);
+                });
+            });
+        });
+        if one != self.protections.one_shot {
+            if one {
+                self.toast(now, "Deletion cannot be guaranteed on SSDs", t::CORAL);
+            }
+            self.protections.one_shot = one;
+        }
+    }
+
+    fn view_machines(&mut self, ui: &mut egui::Ui, now: f64) {
+        use nyedarch_buildtool::machines::{self, TagMode};
+
+        w::section_title(
+            ui,
+            "Trusted machines",
+            "A capsule opens on ANY trusted machine. This one is always included.",
+        );
+
+        // Search and tag filter.
+        w::glass_card(ui, "msearch", 118.0, t::CYAN, false, false, |ui, _r, _l| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Search").size(t::SMALL).color(t::TEXT_DIM));
+                ui.add_sized(
+                    vec2(ui.available_width() - 190.0, 28.0),
+                    egui::TextEdit::singleline(&mut self.machine_query)
+                        .hint_text("id or label")
+                        .margin(vec2(8.0, 5.0)),
+                );
+                ui.add_space(8.0);
+                let label = if self.tag_mode_all { "ALL tags" } else { "ANY tag" };
+                if w::ghost_button(ui, "tagmode", label, 108.0).clicked() {
+                    self.tag_mode_all = !self.tag_mode_all;
+                }
+            });
+            ui.add_space(8.0);
+
+            let labels = machines::all_labels();
+            if labels.is_empty() {
+                ui.label(
+                    egui::RichText::new("No labels yet. Import a machine record to add some.")
+                        .size(t::MICRO)
+                        .color(t::MUTED),
+                );
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    for lab in labels {
+                        let on = self.selected_tags.contains(&lab);
+                        let colour = if on { t::MINT } else { t::MUTED };
+                        let galley = ui.painter().layout_no_wrap(
+                            lab.clone(),
+                            t::font(t::MICRO),
+                            colour,
+                        );
+                        let size = galley.size() + vec2(20.0, 10.0);
+                        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                        ui.painter().rect(
+                            rect,
+                            Rounding::same(rect.height() / 2.0),
+                            t::alpha(colour, if on { 0.20 } else { 0.08 }),
+                            Stroke::new(1.0, t::alpha(colour, if on { 0.8 } else { 0.35 })),
+                        );
+                        ui.painter().galley(rect.min + vec2(10.0, 5.0), galley, colour);
+                        if resp.clicked() {
+                            if on {
+                                self.selected_tags.retain(|t| t != &lab);
+                            } else {
+                                self.selected_tags.push(lab.clone());
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        ui.add_space(12.0);
+
+        let mode = if self.tag_mode_all { TagMode::All } else { TagMode::Any };
+        let selected = machines::select(&self.machine_query, &self.selected_tags, mode);
+
+        // What the capsule will actually contain (spec §48).
+        w::glass_card(ui, "mcount", 62.0, t::MINT, true, false, |ui, _r, _l| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Included machines: {}", selected.len()))
+                        .size(t::H_SECTION)
+                        .color(t::TEXT),
+                );
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("this machine is always included")
+                        .size(t::MICRO)
+                        .color(t::MUTED),
+                );
+            });
+        });
+
+        ui.add_space(10.0);
+
+        for (i, m) in selected.iter().enumerate() {
+            let accent = if m.is_this_machine { t::VIOLET } else { t::MINT };
+            let id = m.id[..16.min(m.id.len())].to_string();
+            let labels = m.labels.join("   ");
+            let creator = m.is_this_machine;
+            w::glass_card(ui, &format!("m{i}"), 78.0, accent, creator, false, |ui, rect, _l| {
+                ui.label(egui::RichText::new(&id).size(t::BODY).monospace().color(t::TEXT));
+                ui.label(egui::RichText::new(&labels).size(t::MICRO).color(t::MUTED));
+                if creator {
+                    w::pill(
+                        ui,
+                        pos2(rect.right() - 118.0, rect.center().y - 9.0),
+                        "this machine",
+                        t::VIOLET,
+                    );
+                }
+            });
+            ui.add_space(8.0);
+        }
+
+        ui.add_space(4.0);
+        let mut do_import = false;
+        let mut do_export = false;
+        ui.horizontal(|ui| {
+            if w::ghost_button(ui, "import", "Import machine (.nyfp)", 196.0).clicked() {
+                do_import = true;
+            }
+            if w::ghost_button(ui, "export", "Export this machine", 176.0).clicked() {
+                do_export = true;
+            }
+        });
+        if do_import {
+            self.import_machine(now);
+        }
+        if do_export {
+            self.export_machine(now);
+        }
+
+        ui.add_space(12.0);
+        w::note(
+            ui,
+            "Records are authenticated. Editing a record's labels invalidates it, so a machine cannot be relabelled into a capsule it was never trusted for.",
+            t::VIOLET,
+        );
+    }
+
+    fn view_targets(&mut self, ui: &mut egui::Ui, now: f64) {
+        w::section_title(
+            ui,
+            "Build targets",
+            "Capsules are compiled remotely, then checked against a commitment made before the build started.",
+        );
+
+        let mut rows = [
+            ("Linux", "x86_64-unknown-linux-gnu", &mut self.target_linux),
+            ("Windows", "x86_64-pc-windows-msvc", &mut self.target_windows),
+            ("macOS", "aarch64-apple-darwin", &mut self.target_macos),
+        ];
+        for (i, (name, triple, flag)) in rows.iter_mut().enumerate() {
+            let on = **flag;
+            let mut local = on;
+            w::glass_card(ui, &format!("tg{i}"), 74.0, t::CYAN, on, false, |ui, _r, _l| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new(*name).size(t::H_SECTION).color(t::TEXT));
+                        ui.label(
+                            egui::RichText::new(*triple)
+                                .size(t::MICRO)
+                                .monospace()
+                                .color(t::MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        w::protection_switch(ui, &format!("swtg{i}"), &mut local, false);
+                    });
+                });
+            });
+            **flag = local;
+            ui.add_space(8.0);
+        }
+
+        ui.add_space(6.0);
+        let mut priv_repo = self.private_repo;
+        w::glass_card(
+            ui,
+            "repo",
+            86.0,
+            if priv_repo { t::MINT } else { t::CORAL },
+            true,
+            false,
+            |ui, _r, _l| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Private repository")
+                                .size(t::H_SECTION)
+                                .color(t::TEXT),
+                        );
+                        ui.label(
+                            egui::RichText::new(if priv_repo {
+                                "Recommended. Your generated capsule source stays private."
+                            } else {
+                                "A public repository exposes your capsule source and build logs."
+                            })
+                            .size(t::SMALL)
+                            .color(if priv_repo { t::TEXT_DIM } else { t::CORAL }),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        w::protection_switch(ui, "swrepo", &mut priv_repo, false);
+                    });
+                });
+            },
+        );
+        self.private_repo = priv_repo;
+
+        ui.add_space(8.0);
+        let mut apply_now = false;
+        ui.horizontal(|ui| {
+            if w::ghost_button(ui, "applyvis", "Apply visibility to the repository now", 300.0).clicked() {
+                apply_now = true;
+            }
+            ui.label(
+                egui::RichText::new("refused while a build is running")
+                    .size(t::MICRO)
+                    .color(t::MUTED),
+            );
+        });
+        if apply_now {
+            self.apply_visibility(now);
+        }
+
+        ui.add_space(14.0);
+        ui.label(egui::RichText::new("REMOTE BUILD").size(t::MICRO).color(t::MUTED));
+        ui.add_space(6.0);
+
+        let mut remote = self.remote_build;
+        let h = if remote { 196.0 } else { 84.0 };
+        w::glass_card(ui, "gh", h, t::CYAN, remote, false, |ui, _r, _l| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Build on GitHub Actions")
+                            .size(t::H_SECTION)
+                            .color(t::TEXT),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "The capsule shell is compiled remotely into per-platform binaries.",
+                        )
+                        .size(t::SMALL)
+                        .color(t::TEXT_DIM),
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    w::protection_switch(ui, "sw_gh", &mut remote, false);
+                });
+            });
+
+            if remote {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Owner").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.add_sized(
+                        vec2(150.0, 28.0),
+                        egui::TextEdit::singleline(&mut self.gh_owner)
+                            .hint_text("github user or org")
+                            .margin(vec2(8.0, 5.0)),
+                    );
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.add_sized(
+                        vec2(170.0, 28.0),
+                        egui::TextEdit::singleline(&mut self.gh_repo).margin(vec2(8.0, 5.0)),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.add_sized(
+                        vec2(ui.available_width() - 10.0, 28.0),
+                        egui::TextEdit::singleline(&mut self.gh_token)
+                            .password(true)
+                            .hint_text("personal access token with repo scope")
+                            .margin(vec2(8.0, 5.0)),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(
+                        "Held in memory for this session only. NYEDArch never writes it to disk, \
+                         and it is passed to curl on stdin so it cannot appear in the process list.",
+                    )
+                    .size(t::MICRO)
+                    .color(t::MUTED),
+                );
+            }
+        });
+        self.remote_build = remote;
+
+        if self.remote_build {
+            ui.add_space(10.0);
+            w::note(
+                ui,
+                "The capsule source is encrypted before it is pushed, whether the repository is \
+                 public or private, and the key is stored as a repository secret only the build \
+                 runner can read. GitHub never receives your files, passphrase, fingerprints or any \
+                 payload key.",
+                t::VIOLET,
+            );
+        }
+    }
+
+    fn view_build(&mut self, ui: &mut egui::Ui, now: f64) {
+        w::section_title(ui, "Build the capsule", "Check the summary, then build.");
+
+        let col_gap = 20.0;
+        let left_w = 210.0;
+        let right_w = (ui.available_width() - left_w - col_gap).max(260.0);
+
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                vec2(left_w, 250.0),
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| {
+                    ui.add_space(6.0);
+                    w::seal_indicator(ui, 176.0, self.build_progress, self.building, now);
+                    ui.add_space(8.0);
+                    let label = if self.building {
+                        format!("{:.0}%", self.build_progress * 100.0)
+                    } else if self.build_progress >= 1.0 {
+                        "Sealed".to_string()
+                    } else {
+                        "Not built".to_string()
+                    };
+                    ui.label(egui::RichText::new(label).size(t::H_SECTION).color(t::TEXT));
+                },
+            );
+
+            ui.add_space(col_gap);
+
+            ui.allocate_ui_with_layout(
+                vec2(right_w, 250.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    let rows: Vec<(String, String, Color32)> = vec![
+                        (
+                            "Machine".into(),
+                            format!(
+                            "{} trusted machine(s)",
+                            nyedarch_buildtool::machines::select(
+                                &self.machine_query,
+                                &self.selected_tags,
+                                if self.tag_mode_all {
+                                    nyedarch_buildtool::machines::TagMode::All
+                                } else {
+                                    nyedarch_buildtool::machines::TagMode::Any
+                                },
+                            )
+                            .len()
+                        ),
+                            t::MINT,
+                        ),
+                        ("Passphrase".into(), "Argon2id, memory-hard".into(), t::MINT),
+                        (
+                            "Location".into(),
+                            if self.protections.location {
+                                format!("within {} m", self.protections.location_tolerance_m)
+                            } else {
+                                "off".into()
+                            },
+                            if self.protections.location { t::CYAN } else { t::MUTED },
+                        ),
+                        (
+                            "Time".into(),
+                            if self.protections.time {
+                                format!(
+                                    "{} +/- {} min, daily",
+                                    self.protections.time_of_day, self.protections.time_tolerance_min
+                                )
+                            } else {
+                                "off".into()
+                            },
+                            if self.protections.time { t::CYAN } else { t::MUTED },
+                        ),
+                        (
+                            "Execution".into(),
+                            if self.protections.one_shot { "one-shot".into() } else { "reusable".into() },
+                            if self.protections.one_shot { t::CORAL } else { t::MUTED },
+                        ),
+                        (
+                            "Repository".into(),
+                            if self.private_repo { "private".into() } else { "PUBLIC".into() },
+                            if self.private_repo { t::MINT } else { t::CORAL },
+                        ),
+                    ];
+
+                    ui.label(egui::RichText::new("SUMMARY").size(t::MICRO).color(t::MUTED));
+                    ui.add_space(4.0);
+                    for (i, (k, v, c)) in rows.iter().enumerate() {
+                        let (rect, _) =
+                            ui.allocate_exact_size(vec2(right_w, 34.0), Sense::hover());
+                        if i % 2 == 0 {
+                            ui.painter().rect_filled(
+                                rect,
+                                Rounding::same(8.0),
+                                t::alpha(t::GLASS, 0.75),
+                            );
+                        }
+                        ui.painter()
+                            .circle_filled(pos2(rect.left() + 12.0, rect.center().y), 4.0, *c);
+                        ui.painter().text(
+                            pos2(rect.left() + 26.0, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            k,
+                            t::font(t::SMALL),
+                            t::TEXT_DIM,
+                        );
+                        ui.painter().text(
+                            pos2(rect.right() - 10.0, rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            v,
+                            t::font(t::SMALL),
+                            *c,
+                        );
+                    }
+                },
+            );
+        });
+
+        ui.add_space(14.0);
+        let ready = self.ready_to_build() && !self.building;
+        let label = if self.building { "Building..." } else { "Build capsule" };
+        ui.horizontal(|ui| {
+            if w::primary_button(ui, "build", label, ready, 200.0).clicked() && ready {
+                self.start_build(now);
+            }
+            if self.building {
+                ui.add_space(10.0);
+                if w::ghost_button(ui, "cancelbuild", "Cancel", 120.0).clicked() {
+                    if let Some(c) = &self.cancel_flag {
+                        c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        self.say(now, "Cancelling; nothing partial will be left behind.");
+                    }
+                }
+            }
+        });
+
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            use nyedarch_package::pipeline::CompressionMode as CM;
+            ui.label(egui::RichText::new("Compression").size(t::SMALL).color(t::TEXT_DIM));
+            for m in [CM::Automatic, CM::Balanced, CM::Maximum, CM::Fast] {
+                let on = self.compression == m;
+                if w::ghost_button(ui, &format!("cm{}", m.label()), m.label(), 96.0).clicked() {
+                    self.compression = m;
+                }
+                if on {
+                    // Mark the active choice; ghost buttons do not carry state.
+                    let r = ui.min_rect();
+                    let _ = r;
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new(format!("Selected: {}", self.compression.label()))
+                .size(t::MICRO)
+                .color(t::MINT),
+        );
+
+        ui.add_space(6.0);
+        let mut creator = self.creator_mode;
+        ui.horizontal(|ui| {
+            w::protection_switch(ui, "sw_creator", &mut creator, false);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Creator mode").size(t::SMALL).color(t::TEXT));
+                ui.label(
+                    egui::RichText::new(
+                        "Diagnostics about this build only. It grants no authority, skips no check, \
+                         and weakens no capsule.",
+                    )
+                    .size(t::MICRO)
+                    .color(t::MUTED),
+                );
+            });
+        });
+        self.creator_mode = creator;
+        if !self.ready_to_build() {
+            ui.add_space(6.0);
+            let missing = if !self.step_done(Step::Source) {
+                "Choose what to protect first."
+            } else if !self.step_done(Step::Protections) {
+                "Set a passphrase first."
+            } else {
+                "Choose at least one build target."
+            };
+            ui.label(egui::RichText::new(missing).size(t::SMALL).color(t::MUTED));
+        }
+
+        ui.add_space(14.0);
+        let log_h = 150.0_f32.min(ui.available_height().max(90.0));
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), log_h), Sense::hover());
+        ui.painter()
+            .rect(rect, t::card_rounding(), t::alpha(t::VOID, 0.8), t::hairline());
+        let mut y = rect.bottom() - 20.0;
+        for (ts, line) in self.log.iter().rev() {
+            if y < rect.top() + 10.0 {
+                break;
+            }
+            let age = (now - ts) as f32;
+            let fade = (1.0 - (age / 60.0)).clamp(0.4, 1.0);
+            ui.painter().text(
+                pos2(rect.left() + 14.0, y),
+                Align2::LEFT_CENTER,
+                line,
+                t::mono(t::SMALL),
+                t::alpha(t::TEXT_DIM, fade),
+            );
+            y -= 19.0;
+        }
+    }
+
+    fn view_run(&mut self, ui: &mut egui::Ui, now: f64, hovering_file: bool) {
+        w::section_title(
+            ui,
+            "Run a capsule",
+            "Drop a .nyarch capsule anywhere on this window, or open one from the Capsule menu.",
+        );
+
+        let name = self
+            .dropped_capsule
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|f| f.to_string_lossy().to_string());
+        w::drop_zone(ui, 200.0, hovering_file, name.as_deref(), now);
+
+        ui.add_space(14.0);
+        let mut want_out = false;
+        w::glass_card(ui, "outdir", 96.0, t::CYAN, false, false, |ui, _r, _l| {
+            ui.label(egui::RichText::new("EXTRACT TO").size(t::MICRO).color(t::MUTED));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let w = ui.available_width() - 110.0;
+                ui.add_sized(
+                    vec2(w.max(120.0), 32.0),
+                    egui::TextEdit::singleline(&mut self.run_out_dir)
+                        .hint_text("leave empty for the capsule's default")
+                        .margin(vec2(10.0, 7.0)),
+                );
+                if w::ghost_button(ui, "pickout", "Choose...", 100.0).clicked() {
+                    want_out = true;
+                }
+            });
+        });
+        if want_out {
+            self.pick_output_dir(now);
+        }
+
+        ui.add_space(12.0);
+        let can_run = self.dropped_capsule.is_some();
+        if w::primary_button(ui, "run", "Run capsule", can_run, 190.0).clicked() && can_run {
+            if let Some(path) = self.dropped_capsule.clone() {
+                let out = if self.run_out_dir.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(self.run_out_dir.trim()))
+                };
+                match nyedarch_core::launch::launch(&path, out.as_deref()) {
+                    Ok(pid) => {
+                        self.run_ok = true;
+                        self.run_status = format!("Running as an independent process (pid {pid}).");
+                        self.say(now, format!("Launched capsule, pid {pid}."));
+                        self.toast(now, "Capsule launched", t::MINT);
+                    }
+                    Err(e) => {
+                        self.run_ok = false;
+                        self.run_status = format!("Could not start it: {e}");
+                        self.say(now, format!("Launch failed: {e}"));
+                        self.toast(now, "Launch failed", t::CORAL);
+                    }
+                }
+            }
+        }
+
+        if !self.run_status.is_empty() {
+            ui.add_space(10.0);
+            ui.label(
+                egui::RichText::new(&self.run_status)
+                    .size(t::SMALL)
+                    .color(if self.run_ok { t::MINT } else { t::CORAL }),
+            );
+        }
+
+        ui.add_space(10.0);
+        w::note(
+            ui,
+            "The capsule authorizes itself. This application grants it nothing and never sees its passphrase.",
+            t::MINT,
+        );
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(nyedarch_core::launch::terminal_hint())
+                .size(t::MICRO)
+                .color(t::MUTED),
+        );
+    }
+}
+
+// ----------------------------------------------------------------- modals ---
+
+impl App {
+    /// Licence gate (spec §13). Until this is accepted the application shows
+    /// nothing else: no menus, no steps, no fingerprint work. Declining closes
+    /// the window rather than leaving a half-usable client.
+    fn draw_eula_gate(&mut self, ctx: &egui::Context, now: f64) {
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("eula_veil"),
+        ));
+        painter.rect_filled(screen, Rounding::ZERO, t::VOID);
+        w::glow(
+            &egui::Ui::new(
+                ctx.clone(),
+                egui::LayerId::new(egui::Order::Background, egui::Id::new("eula_glow")),
+                egui::Id::new("eula_glow_ui"),
+                screen,
+                screen,
+            ),
+            pos2(screen.center().x, screen.top() + screen.height() * 0.30),
+            screen.width() * 0.45,
+            t::VIOLET_DEEP,
+            0.30,
+        );
+
+        egui::Area::new(egui::Id::new("eula_gate"))
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_max_width(660.0);
+                egui::Frame::none()
+                    .fill(t::GLASS)
+                    .stroke(Stroke::new(1.0, t::alpha(t::CYAN, 0.35)))
+                    .rounding(t::card_rounding())
+                    .inner_margin(egui::Margin::symmetric(26.0, 22.0))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
+                            w::aperture(ui, r.center(), 46.0, now, 0.0, false);
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Before you use NYEDArch")
+                                        .size(t::H_TITLE)
+                                        .color(t::TEXT),
+                                );
+                                ui.label(
+                                    egui::RichText::new("End User Licence Agreement")
+                                        .size(t::SMALL)
+                                        .color(t::MUTED),
+                                );
+                            });
+                        });
+                        ui.add_space(14.0);
+
+                        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+                            for para in nyedarch_buildtool::eula::disclosures() {
+                                ui.label(
+                                    egui::RichText::new(para).size(t::SMALL).color(t::TEXT_DIM),
+                                );
+                                ui.add_space(8.0);
+                            }
+                        });
+
+                        ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            if w::primary_button(ui, "eula_ok", "I accept", true, 180.0).clicked() {
+                                match nyedarch_buildtool::eula::record_acceptance() {
+                                    Ok(()) => {
+                                        self.eula_accepted = true;
+                                        self.say(now, "Licence accepted and recorded.");
+                                    }
+                                    Err(e) => {
+                                        // Accepting but failing to persist would
+                                        // silently re-prompt forever; say so.
+                                        self.eula_accepted = true;
+                                        self.say(now, format!("Accepted, but {e}"));
+                                    }
+                                }
+                            }
+                            ui.add_space(10.0);
+                            if w::ghost_button(ui, "eula_no", "Decline and quit", 180.0).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Full text: docs/EULA.md")
+                                .size(t::MICRO)
+                                .color(t::MUTED),
+                        );
+                    });
+            });
+    }
+
+    fn draw_modal(&mut self, ctx: &egui::Context) {
+        if self.modal == Modal::None {
+            return;
+        }
+        let (title, body): (&str, Vec<&str>) = match self.modal {
+            Modal::Eula => (
+                "End User Licence Agreement",
+                vec![
+                    "NYEDArch reads platform identifiers to build a machine fingerprint. Only salted digests are stored; raw identifiers never are, and nothing is transmitted.",
+                    "Capsules are compiled by GitHub Actions in a repository in your own account. Private is the default. A public repository exposes your generated source and build logs.",
+                    "Private key material is held in your platform's secure storage. LOSING IT MAY MAKE EXISTING CAPSULES PERMANENTLY UNRECOVERABLE. There is no recovery and no backdoor.",
+                    "The time protection uses the local clock, which whoever controls the machine can change. It is a recurring policy control, not a tamper-proof expiry.",
+                    "One-shot deletion is best effort. Software cannot guarantee erasure on SSDs or copy-on-write filesystems.",
+                    "NYEDArch raises the cost of unauthorized access. It is NOT unbreakable. See docs/ANTI_RE_ANALYSIS.md for exactly what someone holding a capsule can extract.",
+                    "A capsule is not a backup. Keep independent copies of anything you seal.",
+                    "Full text: docs/EULA.md",
+                ],
+            ),
+            Modal::About => (
+                "About NYEDArch",
+                vec![
+                    "NYEDArch - Not Your Everyday Archive.",
+                    "An ordinary archive is passive: it waits for a program to open it, and once copied it protects nothing. A NYEDArch capsule is the opposite. It is an executable that carries its data, the rules for opening it, and the logic to enforce them.",
+                    "The aperture in this interface is the idea itself: layers that stay shut until every protection is satisfied, on the machine, by the person, in the place, at the time you chose.",
+                    "Prototype 0.0.1  ·  crypto version 1  ·  package format 1",
+                ],
+            ),
+            Modal::Shortcuts => (
+                "Keyboard",
+                vec![
+                    "Ctrl+N       New capsule",
+                    "Ctrl+O       Open a capsule to run",
+                    "Ctrl+B       Build capsule",
+                    "Ctrl+Enter   Build capsule",
+                    "Esc          Close this panel",
+                    "",
+                    "Drop a .nyarch file anywhere on the window to load it.",
+                ],
+            ),
+            Modal::None => return,
+        };
+
+        let screen = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("modal_veil"),
+        ));
+        painter.rect_filled(screen, Rounding::ZERO, t::alpha(t::VOID, 0.72));
+
+        let mut open = true;
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .default_width(560.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(t::GLASS)
+                    .stroke(Stroke::new(1.0, t::alpha(t::CYAN, 0.35)))
+                    .rounding(t::card_rounding())
+                    .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+            )
+            .show(ctx, |ui| {
+                for line in body {
+                    if line.is_empty() {
+                        ui.add_space(6.0);
+                        continue;
+                    }
+                    let mono = matches!(self.modal, Modal::Shortcuts);
+                    let rt = if mono {
+                        egui::RichText::new(line).monospace().size(t::SMALL).color(t::TEXT_DIM)
+                    } else {
+                        egui::RichText::new(line).size(t::SMALL).color(t::TEXT_DIM)
+                    };
+                    ui.label(rt);
+                    ui.add_space(6.0);
+                }
+                ui.add_space(6.0);
+                if w::ghost_button(ui, "modal_close", "Close", 110.0).clicked() {
+                    self.modal = Modal::None;
+                }
+            });
+        if !open {
+            self.modal = Modal::None;
+        }
+    }
+}
+
+// ------------------------------------------------------------------- app ----
+
+impl App {
+    fn handle_drops(&mut self, ctx: &egui::Context, now: f64) {
+        let dropped: Vec<std::path::PathBuf> =
+            ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        if dropped.is_empty() {
+            return;
+        }
+        self.goto(Step::Run, now);
+        for path in dropped {
+            match nyedarch_core::launch::validate(&path) {
+                Ok(()) => {
+                    self.run_status.clear();
+                    self.run_ok = false;
+                    self.toast(now, "Capsule ready", t::MINT);
+                    self.say(now, format!("Loaded {}", path.display()));
+                    self.dropped_capsule = Some(path);
+                }
+                Err(e) => {
+                    self.dropped_capsule = None;
+                    self.run_ok = false;
+                    self.run_status = format!("Cannot run that file: {e}");
+                    self.toast(now, "Not a capsule", t::CORAL);
+                }
+            }
+        }
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context, now: f64) {
+        let (new_c, open_c, build_c, esc) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::N),
+                i.modifiers.command && i.key_pressed(egui::Key::O),
+                (i.modifiers.command && i.key_pressed(egui::Key::B))
+                    || (i.modifiers.command && i.key_pressed(egui::Key::Enter)),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if esc {
+            self.modal = Modal::None;
+        }
+        if new_c {
+            self.reset(now);
+        }
+        if open_c {
+            self.pick_capsule(now);
+        }
+        if build_c && self.ready_to_build() && !self.building {
+            self.goto(Step::Build, now);
+            self.start_build(now);
+        }
+    }
+
+    fn draw_toast(&mut self, ctx: &egui::Context, now: f64) {
+        let Some((msg, at, colour)) = self.toast.clone() else {
+            return;
+        };
+        let age = (now - at) as f32;
+        let life = 2.8;
+        if age > life {
+            self.toast = None;
+            return;
+        }
+        let appear = t::ease_out_back((age / 0.28).clamp(0.0, 1.0));
+        let fade = if age > life - 0.5 {
+            1.0 - (age - (life - 0.5)) / 0.5
+        } else {
+            1.0
+        };
+
+        let screen = ctx.screen_rect();
+        let (wd, ht) = (300.0, 46.0);
+        let rect = Rect::from_min_size(
+            pos2(screen.right() - wd - 22.0, screen.top() + 46.0 + (appear - 1.0) * 40.0),
+            vec2(wd, ht),
+        );
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("toast"),
+        ));
+        painter.rect(
+            rect,
+            t::card_rounding(),
+            t::alpha(t::GLASS_HI, 0.97 * fade),
+            Stroke::new(1.0, t::alpha(colour, 0.85 * fade)),
+        );
+        painter.circle_filled(pos2(rect.left() + 20.0, rect.center().y), 5.0, t::alpha(colour, fade));
+        painter.text(
+            pos2(rect.left() + 38.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            msg,
+            t::font(t::SMALL),
+            t::alpha(t::TEXT, fade),
+        );
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        t::apply(ctx);
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+
+        let now = ctx.input(|i| i.time);
+        let pointer = ctx.pointer_latest_pos();
+        let hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
+
+        // Nothing else runs until the licence is accepted.
+        if !self.eula_accepted {
+            self.draw_eula_gate(ctx, now);
+            self.draw_toast(ctx, now);
+            return;
+        }
+
+        self.shortcuts(ctx, now);
+        self.handle_drops(ctx, now);
+
+        self.poll_build(now);
+
+        self.menu_bar(ctx, now);
+        self.rail(ctx, now);
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(t::VOID))
+            .show(ctx, |ui| {
+                let full = ui.max_rect();
+                w::void_background(ui, full, now, pointer);
+
+                let since = (now - self.step_changed_at) as f32;
+                let e = t::ease_out_cubic((since / 0.30).clamp(0.0, 1.0));
+                let content = full.shrink2(vec2(30.0, 22.0)).translate(vec2(0.0, (1.0 - e) * 16.0));
+                let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::Min));
+                child.set_opacity(e);
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(&mut child, |ui| match self.step {
+                        Step::Source => self.view_source(ui, now),
+                        Step::Protections => self.view_protections(ui, now),
+                        Step::Machines => self.view_machines(ui, now),
+                        Step::Targets => self.view_targets(ui, now),
+                        Step::Build => self.view_build(ui, now),
+                        Step::Run => self.view_run(ui, now, hovering_file),
+                    });
+            });
+
+        if hovering_file && self.step != Step::Run {
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("dropveil"),
+            ));
+            let r = ctx.screen_rect();
+            painter.rect_filled(r, Rounding::ZERO, t::alpha(t::VOID, 0.6));
+            painter.text(
+                r.center(),
+                Align2::CENTER_CENTER,
+                "Release to load the capsule",
+                t::font(t::H_TITLE),
+                t::CYAN,
+            );
+        }
+
+        self.draw_modal(ctx);
+        self.draw_toast(ctx, now);
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let opts = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1120.0, 760.0])
+            .with_min_inner_size([940.0, 640.0])
+            .with_title("NYEDArch"),
+        ..Default::default()
+    };
+    eframe::run_native("NYEDArch", opts, Box::new(|_cc| Box::<App>::default()))
+}

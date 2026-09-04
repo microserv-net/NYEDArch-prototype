@@ -1,0 +1,30 @@
+# Deliberately its own workspace: the GUI pulls windowing/GPU dependencies and
+# needs a display, so it is kept out of the verified core workspace.
+[workspace]
+
+[package]
+name = "nyedarch-gui"
+version = "0.0.1"
+edition = "2021"
+license = "UNLICENSED"
+
+[dependencies]
+eframe = "0.27"
+# Native file dialogs. Without this the picker cannot open a real chooser.
+rfd = "0.14"
+egui = "0.27"
+nyedarch-core = { path = "../../crates/nyedarch-core" }
+nyedarch-crypto = { path = "../../crates/nyedarch-crypto" }
+nyedarch-package = { path = "../../crates/nyedarch-package" }
+nyedarch-fingerprint = { path = "../../crates/nyedarch-fingerprint" }
+nyedarch-github = { path = "../../crates/nyedarch-github" }
+# The real sealing pipeline. The GUI calls exactly what the CLI calls.
+nyedarch-buildtool = { path = "../../crates/nyedarch-buildtool" }
+nyedarch-platform = { path = "../../crates/nyedarch-platform" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
