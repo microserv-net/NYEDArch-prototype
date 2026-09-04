@@ -1,0 +1,64 @@
+name: release
+
+# Produces the distributable release directory for a tag. The installer, the
+# vendored runtime sources and the documentation travel together: a release that
+# ships binaries without runtime-src cannot generate a capsule.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this release is being built"
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: release (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux }
+          - { os: macos-14, name: macos }
+          - { os: windows-latest, name: windows }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}
+
+      # The build script refuses to package a failing tree, which is the point.
+      - name: Build the release directory
+        shell: bash
+        run: |
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            cmd.exe /c build.bat --skip-gui
+          else
+            bash build.sh --skip-gui
+          fi
+
+      - name: Verify the release checksums
+        shell: bash
+        working-directory: release
+        run: |
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            ./install.exe --verify
+          else
+            ./install --verify
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nyedarch-release-${{ matrix.name }}
+          path: release/
+          if-no-files-found: error
+          # Kept short: a release directory is large, and Actions storage is not
+          # an archive.
+          retention-days: 7

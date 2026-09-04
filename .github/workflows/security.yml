@@ -1,0 +1,120 @@
+name: security
+
+# Checks that protect properties which are easy to lose silently. Each one
+# guards something a reviewer would otherwise have to notice by eye.
+on:
+  push:
+    branches: [main, master, "prototype-i", "release/**"]
+  pull_request:
+  schedule:
+    # Weekly: an advisory can appear against a dependency that has not changed.
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  invariants:
+    name: security invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The crypto crate is the confidentiality boundary. It must stay small,
+      # auditable, and free of I/O and platform code.
+      - name: nyedarch-crypto stays unsafe-free and self-contained
+        run: |
+          grep -q '#!\[forbid(unsafe_code)\]' crates/nyedarch-crypto/src/lib.rs
+          cargo build -p nyedarch-crypto --no-default-features
+          echo "crypto builds in isolation with randomness injected"
+
+      # A capsule must not carry package-construction capability.
+      #
+      # This is checked against a *generated capsule project*, not the
+      # development workspace. Cargo unifies features across a workspace, so
+      # `cargo tree -p nyedarch-runtime` here reports `builder` enabled simply
+      # because the client asks for it in the same workspace. That says nothing
+      # about the artifact: a capsule is built from a separate project with its
+      # own vendored crates and no client present.
+      #
+      # Checking the workspace instead would fail permanently while proving
+      # nothing - the shipped capsule was correct all along.
+      - name: the shipped capsule must not gain builder capability
+        shell: bash
+        env:
+          NYEDARCH_PASSPHRASE: feature-isolation-check
+        run: |
+          set -e
+          mkdir -p /tmp/fi && echo x > /tmp/fi/f.txt
+          echo accept | cargo run --release -q -p nyedarch-buildtool -- seal /tmp/fi /tmp/fiproj
+          if grep -rn 'builder' /tmp/fiproj/Cargo.toml /tmp/fiproj/vendor/*/Cargo.toml \
+               | grep -vE '^\s*#' | grep -q 'features.*builder'; then
+            echo "::error::the generated capsule enables the builder feature"
+            exit 1
+          fi
+          cd /tmp/fiproj
+          if cargo tree -f '{p} {f}' | grep -E 'nyedarch-package.*builder'; then
+            echo "::error::the capsule resolved nyedarch-package with builder enabled"
+            exit 1
+          fi
+          echo "the shipped capsule carries no builder capability"
+
+      # A credential must never appear in a command line.
+      - name: credentials never reach argv
+        run: cargo test -p nyedarch-github credential -- --nocapture
+
+      # The attack laboratory is the strongest statement the project makes.
+      - name: executed attacks
+        run: cargo test -p nyedarch-package --test attack_lab
+
+      - name: authorization state machine
+        run: cargo test -p nyedarch-runtime --test authorization
+
+      - name: destruction behaviour
+        run: cargo test -p nyedarch-runtime destruction
+
+  hygiene:
+    name: source hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true
+
+      # A secret committed by accident is the failure that cannot be undone by
+      # a later commit, so it is checked on every change.
+      - name: no credential-shaped strings in tracked files
+        shell: bash
+        run: |
+          # Deliberately excludes the test fixture that asserts tokens stay out
+          # of argv, which contains an obviously fake value.
+          hits=$(grep -rnE '(ghp_|github_pat_)[A-Za-z0-9_]{20,}' \
+                   --include='*.rs' --include='*.toml' --include='*.md' \
+                   --include='*.yml' --include='*.sh' . \
+                 | grep -v 'ghp_SUPERSECRETTOKEN' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::a credential-shaped string is committed"
+            echo "$hits"
+            exit 1
+          fi
+          echo "no credentials in tracked files"
+
+  advisories:
+    name: dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true

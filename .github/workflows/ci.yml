@@ -1,0 +1,116 @@
+name: ci
+
+# Every change to Prototype-I is checked on all three supported platforms.
+# The capsule is the product, so the suite does not stop at "it compiles": it
+# seals a capsule, builds it, runs it, and verifies the extraction byte for byte.
+on:
+  push:
+    branches: [main, master, "prototype-i", "release/**"]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  # A superseded run tells you nothing; cancel it and save the minutes.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A capsule must never be built with a stale incremental cache.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      # Warnings are failures here. A generated capsule is compiled in a log the
+      # public can read when the build repository is public, and a warning is
+      # both noise and a hint about which protections a capsule does not use.
+      - name: Warnings are failures
+        run: cargo build --workspace --all-targets 2>&1 | tee /tmp/build.txt
+        shell: bash
+
+      - name: Assert no warnings
+        shell: bash
+        run: |
+          n=$(grep -c '^warning' /tmp/build.txt || true)
+          if [ "$n" != "0" ]; then
+            echo "::error::$n compiler warning(s); the tree must build clean"
+            grep -A3 '^warning' /tmp/build.txt | head -40
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --workspace
+
+  capsule:
+    name: end-to-end capsule (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: capsule-${{ matrix.os }}
+
+      - name: Seal, build, run, verify
+        shell: bash
+        env:
+          NYEDARCH_PASSPHRASE: ci-end-to-end-passphrase
+        run: |
+          set -e
+          mkdir -p /tmp/src && echo "ci payload" > /tmp/src/file.txt
+          echo accept | cargo run --release -q -p nyedarch-buildtool -- \
+            seal /tmp/src /tmp/proj
+          cd /tmp/proj
+          cargo build --release
+
+          bin="target/release/nyedarch-capsule"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          cp "$bin" /tmp/capsule.nyarch
+          chmod +x /tmp/capsule.nyarch || true
+
+          /tmp/capsule.nyarch /tmp/out
+          diff -r /tmp/src /tmp/out/src
+
+          # A wrong passphrase must be refused and must leave nothing behind.
+          if NYEDARCH_PASSPHRASE=wrong /tmp/capsule.nyarch /tmp/bad; then
+            echo "::error::a wrong passphrase was accepted"
+            exit 1
+          fi
+          if [ -d /tmp/bad ] && [ -n "$(ls -A /tmp/bad 2>/dev/null)" ]; then
+            echo "::error::a denied run wrote output"
+            exit 1
+          fi
+          echo "end to end: extraction identical, denial clean"
+
+      # A generated capsule must compile without warnings, because that log is
+      # public whenever the build repository is.
+      - name: The generated capsule must build clean
+        shell: bash
+        run: |
+          n=$(cd /tmp/proj && cargo build --release 2>&1 | grep -c '^warning' || true)
+          if [ "$n" != "0" ]; then
+            echo "::error::the generated capsule produced $n warning(s)"
+            exit 1
+          fi
