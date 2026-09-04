@@ -1,0 +1,26 @@
+[package]
+name = "nyedarch-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+# On-machine transport + GitHub's required libsodium sealed-box sealer. Optional
+# so the core library compiles and unit-tests offline with no network surface.
+reqwest = { version = "0.12", features = ["blocking", "json"], optional = true }
+crypto_box = { version = "0.9", features = ["seal"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+# The sealed-box sealer is required for ANY remote build: GitHub will not accept
+# a repository secret that is not encrypted to the repo's public key. It pulls
+# only libsodium's crypto_box, not an HTTP stack, so it is on by default.
+default = ["sealer"]
+sealer = ["dep:crypto_box"]
+# The reqwest transport is optional; the default transport shells out to curl.
+net = ["dep:reqwest", "dep:serde_json", "sealer"]
