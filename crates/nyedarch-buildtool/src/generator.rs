@@ -9,6 +9,32 @@ use std::fs;
 use std::path::Path;
 
 /// Crates the generated capsule needs. Deliberately the runtime set only —
+/// Remove the `[dev-dependencies]` section from a vendored manifest.
+///
+/// Stops at the next top-level section so nothing else is disturbed.
+fn strip_dev_dependencies(manifest: &Path) -> std::io::Result<()> {
+    let Ok(text) = fs::read_to_string(manifest) else { return Ok(()) };
+    let mut out = String::with_capacity(text.len());
+    let mut skipping = false;
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with('[') {
+            // A new section always ends any skip, including nested tables such
+            // as [dev-dependencies.foo].
+            skipping = t.starts_with("[dev-dependencies");
+            if skipping {
+                out.push_str("# [dev-dependencies] removed: a capsule project has no tests.\n");
+                continue;
+            }
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    fs::write(manifest, out)
+}
+
 /// builder-side crates are never vendored into a capsule project.
 const RUNTIME_CRATES: &[&str] = &[
     "nyedarch-crypto",
@@ -90,6 +116,15 @@ pub fn generate(
     fs::create_dir_all(&vendor)?;
     for c in RUNTIME_CRATES {
         copy_tree(&crates_root.join(c), &vendor.join(c))?;
+        // Strip test-only wiring from the vendored manifest.
+        //
+        // The crates' own dev-dependencies enable the `builder` feature so their
+        // tests can construct packages. Cargo does not compile dev-dependencies
+        // into a release binary, so the capsule never gained that capability -
+        // but a capsule project has no tests, and shipping the wiring means the
+        // source pushed to a build environment mentions builder capability for
+        // no reason. Removing it makes what is shipped match what is needed.
+        strip_dev_dependencies(&vendor.join(c).join("Cargo.toml"))?;
     }
     let cargo = format!(
         r#"# Generated NYEDArch capsule project. Self-contained: the runtime crates
