@@ -1,0 +1,33 @@
+[package]
+name = "nyedarch-buildtool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+# Prototype driver standing in for the GUI inside the sandbox: it captures this
+# machine's fingerprint, seals a package, and generates a runtime binary project.
+[[bin]]
+name = "nyedarch-buildtool"
+path = "src/main.rs"
+
+[dependencies]
+nyedarch-crypto = { path = "../nyedarch-crypto" }
+nyedarch-core = { path = "../nyedarch-core" }
+nyedarch-github = { path = "../nyedarch-github" }
+nyedarch-package = { path = "../nyedarch-package", features = ["builder"] }
+nyedarch-fingerprint = { path = "../nyedarch-fingerprint" }
+nyedarch-platform = { path = "../nyedarch-platform" }
+serde = { workspace = true }
+bincode = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
+# Client-side only. clap never reaches a generated capsule: the capsule crate
+# does not depend on this one.
+clap = { version = "4", features = ["derive", "wrap_help"] }
+sha2 = "0.10"
+
+[lib]
+name = "nyedarch_buildtool"
+path = "src/lib.rs"
