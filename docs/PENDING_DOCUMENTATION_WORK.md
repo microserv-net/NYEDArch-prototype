@@ -1,3 +1,7 @@
+> **Prototype-I is complete.** Everything still listed here is either
+> Prototype-II design work or blocked on hardware nobody in this project
+> currently has. Nothing below is required for Prototype-I.
+
 # Pending documentation work — TO BE DONE
 
 > **Prototype-I is complete** (`PROTOTYPE_I_COMPLETE.md`). Everything remaining

@@ -354,6 +354,11 @@ fn is_shell_safe(p: &str) -> bool {
 }
 
 /// The scrub-and-delete command, as a POSIX shell fragment.
+///
+/// Unix only. Windows uses PowerShell for the same job, so without this gate the
+/// function is dead code there and the capsule compiles with a warning - visible
+/// to anyone reading the build log when the repository is public.
+#[cfg(unix)]
 fn posix_script(p: &str, wait_pid: Option<u32>) -> String {
     let wait = match wait_pid {
         Some(pid) => format!(
