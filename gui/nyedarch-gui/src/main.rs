@@ -125,7 +125,7 @@ impl Default for Protections {
             machine: true,
             passphrase: true,
             location: false,
-            location_tolerance_m: 150,
+            location_tolerance_m: 60,
             time: false,
             time_of_day: "14:00".to_string(),
             time_tolerance_min: 15,
@@ -144,14 +144,17 @@ struct App {
     passphrase: String,
     protections: Protections,
 
-    private_repo: bool,
+    /// The build repository name. Locked until the user chooses to change it,
+    /// because a wrong name here silently creates a second repository.
+    gh_repo_locked: bool,
+    /// Resolved from the token, not typed. None until first resolved.
+    gh_owner_resolved: Option<String>,
     /// GitHub credentials. The token is held in memory for this session only
     /// and is never written to disk by NYEDArch.
     gh_owner: String,
     gh_repo: String,
     gh_token: String,
     /// Whether to dispatch the remote build after sealing.
-    remote_build: bool,
     target_windows: bool,
     target_macos: bool,
     target_linux: bool,
@@ -207,17 +210,19 @@ impl Default for App {
             source_path: String::new(),
             passphrase: String::new(),
             protections: Protections::default(),
-            private_repo: true,
+            gh_repo_locked: true,
+            gh_owner_resolved: None,
             // Pre-fill from the environment if present, exactly as the CLI does.
             gh_owner: String::new(),
             gh_repo: "nyedarch-builds".to_string(),
             gh_token: std::env::var("NYEDARCH_GITHUB_TOKEN")
                 .or_else(|_| std::env::var("GITHUB_TOKEN"))
                 .unwrap_or_default(),
-            remote_build: true,
-            target_windows: false,
-            target_macos: false,
-            target_linux: true,
+            // Default to the platform this client is running on: the capsule a
+            // user most likely wants first is one that runs where they are.
+            target_windows: cfg!(target_os = "windows"),
+            target_macos: cfg!(target_os = "macos"),
+            target_linux: cfg!(target_os = "linux"),
             log: {
                 let mut l = vec![(0.0, "Ready. Choose what to protect.".to_string())];
                 // Same client anti-analysis check the CLI runs.
@@ -259,15 +264,48 @@ impl App {
         2 + self.protections.location as usize + self.protections.time as usize
     }
 
+    /// Whether the passphrase is strong enough to build with.
+    ///
+    /// Refused rather than warned about. The passphrase is the factor an
+    /// attacker actually attacks offline: Argon2id makes each guess expensive,
+    /// but it cannot rescue a phrase that appears in a wordlist.
+    fn passphrase_acceptable(&self) -> bool {
+        w::passphrase_strength(&self.passphrase).0 >= 0.4
+    }
+
     fn step_done(&self, s: Step) -> bool {
         match s {
             Step::Source => !self.source_path.trim().is_empty(),
-            Step::Protections => !self.passphrase.is_empty(),
+            Step::Protections => self.passphrase_acceptable(),
             Step::Machines => true, // the creator machine is always trusted
             Step::Targets => self.target_windows || self.target_macos || self.target_linux,
             Step::Build => self.build_progress >= 1.0,
             Step::Run => self.run_ok,
         }
+    }
+
+    /// Repository visibility follows creator mode, and nothing else.
+    ///
+    /// There used to be a separate "private repository" switch beside creator
+    /// mode. Two controls for one decision is one too many, and they could
+    /// disagree - a capsule built in "creator mode" on a private repository
+    /// produced diagnostics nobody could see, and the reverse quietly published
+    /// build logs. Creator mode now means exactly one thing: build in the open.
+    fn repo_should_be_private(&self) -> bool {
+        !self.creator_mode
+    }
+
+    /// The account the token belongs to, resolved once and remembered.
+    fn resolved_owner(&mut self) -> Option<String> {
+        if self.gh_token.trim().is_empty() {
+            return None;
+        }
+        if self.gh_owner_resolved.is_none() {
+            self.gh_owner_resolved =
+                nyedarch_buildtool::remote::resolve_owner(Some(self.gh_token.trim().to_string()))
+                    .ok();
+        }
+        self.gh_owner_resolved.clone()
     }
 
     fn selected_targets(&self) -> Vec<nyedarch_github::Target> {
@@ -365,7 +403,7 @@ impl App {
                         self.run_status.clear();
                         self.run_ok = false;
                         self.say(now, format!("Loaded {}", p.display()));
-                        self.toast(now, "Capsule ready", t::EMERALD);
+                        self.toast(now, "Capsule ready", t::SKY);
                         self.dropped_capsule = Some(p);
                     }
                     Err(e) => {
@@ -393,7 +431,7 @@ impl App {
                         now,
                         format!("Imported machine {} labels={:?}", &m.id[..16.min(m.id.len())], m.labels),
                     );
-                    self.toast(now, "Machine verified and added", t::EMERALD);
+                    self.toast(now, "Machine verified and added", t::SKY);
                     self.goto(Step::Machines, now);
                 }
                 Err(e) => {
@@ -420,7 +458,7 @@ impl App {
                 Ok(id) => {
                     self.say(now, format!("Exported {} to {}", &id[..16.min(id.len())], p.display()));
                     self.say(now, "The record is authenticated; editing it invalidates it.");
-                    self.toast(now, "Machine exported", t::EMERALD);
+                    self.toast(now, "Machine exported", t::SKY);
                 }
                 Err(e) => {
                     self.say(now, format!("Export failed: {e}"));
@@ -443,16 +481,16 @@ impl App {
             token,
             self.gh_owner.trim(),
             self.gh_repo.trim(),
-            self.private_repo,
+            self.repo_should_be_private(),
         ) {
             Ok(()) => {
-                let word = if self.private_repo { "private" } else { "PUBLIC" };
+                let word = if self.repo_should_be_private() { "private" } else { "PUBLIC" };
                 self.say(now, format!("{}/{} is now {word}.", self.gh_owner.trim(), self.gh_repo.trim()));
-                if !self.private_repo {
+                if !self.repo_should_be_private() {
                     self.say(now, "A public repository exposes your build logs and workflow to anyone.");
                     self.say(now, "The capsule source stays encrypted either way; the key remains a repository secret.");
                 }
-                self.toast(now, format!("Repository is {word}"), if self.private_repo { t::EMERALD } else { t::ROSE });
+                self.toast(now, format!("Repository is {word}"), if self.repo_should_be_private() { t::SKY } else { t::ROSE });
             }
             Err(e) => {
                 for line in e.lines() {
@@ -551,23 +589,28 @@ impl App {
             hardware: nyedarch_platform::hardware::HardwarePolicy::Preferred,
         };
 
-        let remote = if self.remote_build {
-            if self.gh_token.trim().is_empty() || self.gh_owner.trim().is_empty() {
-                self.say(now, "Remote build is on but the GitHub owner or token is missing.");
-                self.say(now, "Set them under Targets, or turn remote build off to build locally.");
-                self.toast(now, "GitHub details missing", t::ROSE);
+        // The remote build is part of the pipeline, not an option.
+        //
+        // It used to be switchable, which left a state where the client had
+        // generated a capsule project and simply stopped - the user was holding
+        // unbuilt source and no capsule. Missing credentials are now a refusal
+        // with an explanation, not a silent change of behaviour.
+        let owner = match self.resolved_owner() {
+            Some(o) => o,
+            None => {
+                self.say(now, "A GitHub token is required: capsules are built remotely.");
+                self.say(now, "Add one under Targets, or set NYEDARCH_GITHUB_TOKEN.");
+                self.toast(now, "GitHub token required", t::ROSE);
                 return;
             }
-            Some((
-                self.gh_owner.trim().to_string(),
-                self.gh_repo.trim().to_string(),
-                self.gh_token.trim().to_string(),
-                self.private_repo,
-                self.selected_targets(),
-            ))
-        } else {
-            None
         };
+        let remote = Some((
+            owner,
+            self.gh_repo.trim().to_string(),
+            self.gh_token.trim().to_string(),
+            self.repo_should_be_private(),
+            self.selected_targets(),
+        ));
 
         let (tx, rx): (Sender<BuildMsg>, Receiver<BuildMsg>) = channel();
         self.build_rx = Some(rx);
@@ -664,7 +707,7 @@ impl App {
                     for d in std::mem::take(&mut self.pending_diagnostics) {
                         self.say(now, format!("  {d}"));
                     }
-                    self.toast(now, "Capsule project created", t::EMERALD);
+                    self.toast(now, "Capsule project created", t::SKY);
                 }
                 BuildMsg::Failed(e) => {
                     self.building = false;
@@ -753,7 +796,7 @@ impl App {
                             // so this simply reports what it now is.
                             let fp = nyedarch_fingerprint::capture();
                             self.say(now, format!("This machine is {}", &fp.id_hex()[..16]));
-                            self.toast(now, "Fingerprint recaptured", t::EMERALD);
+                            self.toast(now, "Fingerprint recaptured", t::SKY);
                             ui.close_menu();
                         }
                     });
@@ -761,8 +804,21 @@ impl App {
                     // Protections: quick toggles mirroring the step, so they can
                     // be reached without navigating.
                     ui.menu_button("Protections", |ui| {
-                        ui.add_enabled(false, egui::Button::new("Machine  (always on)"));
-                        ui.add_enabled(false, egui::Button::new("Passphrase  (always on)"));
+                        // These are not actions, so they are not buttons.
+                        //
+                        // A disabled button paints nothing under this theme and
+                        // read as an empty gap at the top of the menu. They are
+                        // statements of fact, and now look like it.
+                        ui.label(
+                            egui::RichText::new("Machine · always on")
+                                .size(t::SMALL)
+                                .color(t::SKY_DEEP),
+                        );
+                        ui.label(
+                            egui::RichText::new("Passphrase · always on")
+                                .size(t::SMALL)
+                                .color(t::SKY_DEEP),
+                        );
                         ui.separator();
                         if ui
                             .checkbox(&mut self.protections.location, "Location")
@@ -797,7 +853,7 @@ impl App {
                         ui.checkbox(&mut self.target_windows, "Target: Windows");
                         ui.checkbox(&mut self.target_macos, "Target: macOS");
                         ui.separator();
-                        ui.checkbox(&mut self.private_repo, "Private repository");
+                        ui.checkbox(&mut self.repo_should_be_private(), "Private repository");
                     });
 
                     // Help: licence and reference material.
@@ -822,7 +878,7 @@ impl App {
                         let (label, colour) = if self.building {
                             ("building", t::SKY)
                         } else if self.build_progress >= 1.0 {
-                            ("sealed", t::EMERALD)
+                            ("sealed", t::SKY)
                         } else {
                             ("idle", t::INK_MUTED)
                         };
@@ -970,7 +1026,7 @@ impl App {
         let cards = [
             ("Sealed", "Compressed and encrypted in bounded chunks. Nothing plaintext is written.", t::VIOLET),
             ("Bound", "Tied to this build. A payload cannot be moved into another capsule.", t::SKY),
-            ("Standalone", "No reader, no server, no network. The capsule carries everything.", t::EMERALD),
+            ("Standalone", "No reader, no server, no network. The capsule carries everything.", t::SKY),
         ];
         let cw = (ui.available_width() - 20.0) / 3.0;
         ui.horizontal(|ui| {
@@ -1006,7 +1062,7 @@ impl App {
         );
 
         let mut machine = self.protections.machine;
-        w::card(ui, "p_machine", 84.0, t::EMERALD, true, false, |ui, rect, _l| {
+        w::card_outlined(ui, "p_machine", 62.0, t::SKY, |ui, rect, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Machine").size(t::H_SECTION).color(t::INK));
@@ -1020,12 +1076,12 @@ impl App {
                     w::switch(ui, "sw_machine", &mut machine, true);
                 });
             });
-            w::pill(ui.painter(), pos2(rect.left() + 100.0, rect.top() + 14.0), "always on", t::EMERALD, t::alpha(t::EMERALD, 0.12));
+            w::pill(ui.painter(), pos2(rect.left() + 100.0, rect.top() + 14.0), "always on", t::SKY, t::alpha(t::SKY, 0.12));
         });
 
         ui.add_space(8.0);
         let mut pass_on = self.protections.passphrase;
-        w::card(ui, "p_pass", 122.0, t::EMERALD, true, false, |ui, rect, _l| {
+        w::card_outlined(ui, "p_pass", 146.0, t::SKY, |ui, rect, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Passphrase").size(t::H_SECTION).color(t::INK));
@@ -1039,10 +1095,13 @@ impl App {
                     w::switch(ui, "sw_pass", &mut pass_on, true);
                 });
             });
-            w::pill(ui.painter(), pos2(rect.left() + 132.0, rect.top() + 14.0), "always on", t::EMERALD, t::alpha(t::EMERALD, 0.12));
+            w::pill(ui.painter(), pos2(rect.left() + 132.0, rect.top() + 14.0), "always on", t::SKY, t::alpha(t::SKY, 0.12));
             ui.add_space(8.0);
             let w = ui.available_width();
             w::field(ui, "passphrase", &mut self.passphrase, "choose a strong passphrase", w, true);
+            ui.add_space(6.0);
+            let (score, why, colour) = w::passphrase_strength(&self.passphrase);
+            w::strength_meter(ui, w, score, why, colour);
         });
 
         ui.add_space(16.0);
@@ -1050,8 +1109,8 @@ impl App {
         ui.add_space(6.0);
 
         let mut loc = self.protections.location;
-        let loc_h = if loc { 130.0 } else { 84.0 };
-        w::card(ui, "p_loc", loc_h, t::SKY, loc, false, |ui, _r, _l| {
+        let loc_h = if loc { 112.0 } else { 64.0 };
+        w::card_plain(ui, "p_loc", loc_h, t::SKY, loc, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Location").size(t::H_SECTION).color(t::INK));
@@ -1083,8 +1142,8 @@ impl App {
 
         ui.add_space(8.0);
         let mut tm = self.protections.time;
-        let time_h = if tm { 140.0 } else { 84.0 };
-        w::card(ui, "p_time", time_h, t::SKY, tm, false, |ui, _r, _l| {
+        let time_h = if tm { 118.0 } else { 64.0 };
+        w::card_plain(ui, "p_time", time_h, t::SKY, tm, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("Time window").size(t::H_SECTION).color(t::INK));
@@ -1118,7 +1177,7 @@ impl App {
 
         ui.add_space(8.0);
         let mut one = self.protections.one_shot;
-        w::card_tinted(ui, "p_shot", 84.0, t::ROSE, t::ROSE_WASH, one, false, |ui, _r, _l| {
+        w::card_plain(ui, "p_shot", 64.0, t::ROSE, one, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("One-shot capsule").size(t::H_SECTION).color(t::INK));
@@ -1151,7 +1210,7 @@ impl App {
         );
 
         // Search and tag filter.
-        w::card(ui, "msearch", 118.0, t::SKY, false, false, |ui, _r, _l| {
+        w::card_plain(ui, "msearch", 106.0, t::SKY, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Search").size(t::SMALL).color(t::INK_SOFT));
                 let w = ui.available_width() - 190.0;
@@ -1175,7 +1234,7 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     for lab in labels {
                         let on = self.selected_tags.contains(&lab);
-                        let colour = if on { t::EMERALD } else { t::INK_MUTED };
+                        let colour = if on { t::SKY } else { t::INK_MUTED };
                         let galley = ui.painter().layout_no_wrap(
                             lab.clone(),
                             t::font(t::MICRO),
@@ -1208,7 +1267,7 @@ impl App {
         let selected = machines::select(&self.machine_query, &self.selected_tags, mode);
 
         // What the capsule will actually contain (spec §48).
-        w::card(ui, "mcount", 62.0, t::EMERALD, true, false, |ui, _r, _l| {
+        w::card_outlined(ui, "mcount", 54.0, t::SKY, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("Included machines: {}", selected.len()))
@@ -1227,11 +1286,11 @@ impl App {
         ui.add_space(10.0);
 
         for (i, m) in selected.iter().enumerate() {
-            let accent = if m.is_this_machine { t::VIOLET } else { t::EMERALD };
+            let accent = if m.is_this_machine { t::VIOLET } else { t::SKY };
             let id = m.id[..16.min(m.id.len())].to_string();
             let labels = m.labels.join("   ");
             let creator = m.is_this_machine;
-            w::card(ui, &format!("m{i}"), 78.0, accent, creator, false, |ui, rect, _l| {
+            w::card_plain(ui, &format!("m{i}"), 66.0, accent, creator, |ui, rect, _l| {
                 ui.label(egui::RichText::new(&id).size(t::BODY).monospace().color(t::INK));
                 ui.label(egui::RichText::new(&labels).size(t::MICRO).color(t::INK_MUTED));
                 if creator {
@@ -1284,7 +1343,7 @@ impl App {
         for (i, (name, triple, flag)) in rows.iter_mut().enumerate() {
             let on = **flag;
             let mut local = on;
-            w::card(ui, &format!("tg{i}"), 74.0, t::SKY, on, false, |ui, _r, _l| {
+            w::card_plain(ui, &format!("tg{i}"), 60.0, t::SKY, on, |ui, _r, _l| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label(egui::RichText::new(*name).size(t::H_SECTION).color(t::INK));
@@ -1305,41 +1364,6 @@ impl App {
         }
 
         ui.add_space(6.0);
-        let mut priv_repo = self.private_repo;
-        w::card_tinted(
-            ui,
-            "repo",
-            86.0,
-            if priv_repo { t::EMERALD } else { t::ROSE },
-            if priv_repo { t::SURFACE } else { t::AMBER_WASH },
-            true,
-            false,
-            |ui, _r, _l| {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(
-                            egui::RichText::new("Private repository")
-                                .size(t::H_SECTION)
-                                .color(t::INK),
-                        );
-                        ui.label(
-                            egui::RichText::new(if priv_repo {
-                                "Recommended. Your generated capsule source stays private."
-                            } else {
-                                "A public repository exposes your capsule source and build logs."
-                            })
-                            .size(t::SMALL)
-                            .color(if priv_repo { t::INK_SOFT } else { t::ROSE }),
-                        );
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        w::switch(ui, "swrepo", &mut priv_repo, false);
-                    });
-                });
-            },
-        );
-        self.private_repo = priv_repo;
-
         ui.add_space(8.0);
         let mut apply_now = false;
         ui.horizontal(|ui| {
@@ -1360,67 +1384,81 @@ impl App {
         ui.label(egui::RichText::new("REMOTE BUILD").size(t::MICRO).color(t::INK_MUTED));
         ui.add_space(6.0);
 
-        let mut remote = self.remote_build;
-        let h = if remote { 196.0 } else { 84.0 };
-        w::card(ui, "gh", h, t::SKY, remote, false, |ui, _r, _l| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Build on GitHub Actions")
-                            .size(t::H_SECTION)
-                            .color(t::INK),
-                    );
-                    ui.label(
-                        egui::RichText::new(
-                            "The capsule shell is compiled remotely into per-platform binaries.",
-                        )
-                        .size(t::SMALL)
-                        .color(t::INK_SOFT),
-                    );
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::switch(ui, "sw_gh", &mut remote, false);
-                });
-            });
-
-            if remote {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Owner").size(t::SMALL).color(t::INK_SOFT));
-                    w::field(ui, "gh_owner", &mut self.gh_owner, "github user or org", 160.0, false);
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::INK_SOFT));
-                    w::field(ui, "gh_repo", &mut self.gh_repo, "repository", 180.0, false);
-                });
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT));
-                    let w = ui.available_width() - 10.0;
-                    w::field(ui, "gh_token", &mut self.gh_token, "personal access token with repo scope", w, true);
-                });
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(
-                        "Held in memory for this session only. NYEDArch never writes it to disk, \
-                         and it is passed to curl on stdin so it cannot appear in the process list.",
-                    )
+        // Credentials, not a switch. The build always happens remotely.
+        let locked = self.gh_repo_locked;
+        let mut unlock = false;
+        w::card_plain(ui, "gh", 148.0, t::SKY, false, |ui, _r, _l| {
+            ui.label(
+                egui::RichText::new("BUILD ACCOUNT")
                     .size(t::MICRO)
                     .color(t::INK_MUTED),
-                );
-            }
-        });
-        self.remote_build = remote;
+            );
+            ui.add_space(8.0);
 
-        if self.remote_build {
-            ui.add_space(10.0);
-            w::note(
-                ui,
-                "The capsule source is encrypted before it is pushed, whether the repository is \
-                 public or private, and the key is stored as a repository secret only the build \
-                 runner can read. GitHub never receives your files, passphrase, fingerprints or any \
-                 payload key.",
-                t::VIOLET, t::alpha(t::VIOLET, 0.08));
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Account").size(t::SMALL).color(t::INK_SOFT));
+                ui.add_space(6.0);
+                match &self.gh_owner_resolved {
+                    // Read from the token rather than typed: the token already
+                    // proves which account it belongs to, so asking would only
+                    // invite a mismatch.
+                    Some(o) => {
+                        ui.label(egui::RichText::new(o).size(t::SMALL).color(t::INK));
+                        w::pill(
+                            ui.painter(),
+                            ui.cursor().min + vec2(6.0, 1.0),
+                            "from token",
+                            t::SKY_DEEP,
+                            t::SKY_WASH,
+                        );
+                        ui.add_space(84.0);
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("resolved from the token")
+                                .size(t::SMALL)
+                                .color(t::INK_MUTED),
+                        );
+                    }
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::INK_SOFT));
+                ui.add_space(6.0);
+                if locked {
+                    ui.label(egui::RichText::new(&self.gh_repo).size(t::SMALL).color(t::INK));
+                    ui.add_space(8.0);
+                    if w::ghost_button(ui, "unlockrepo", "Change", 84.0).clicked() {
+                        unlock = true;
+                    }
+                } else {
+                    w::field(ui, "gh_repo", &mut self.gh_repo, "repository", 220.0, false);
+                }
+            });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT));
+                ui.add_space(6.0);
+                let w = ui.available_width() - 10.0;
+                w::field(ui, "gh_token", &mut self.gh_token, "personal access token, repo scope", w, true);
+            });
+        });
+        if unlock {
+            self.gh_repo_locked = false;
         }
+
+        ui.add_space(10.0);
+        w::note(
+            ui,
+            "The capsule source is encrypted before it is pushed, and the key is a repository \
+             secret only the build runner can read. GitHub never receives your files, passphrase, \
+             fingerprints or any payload key.",
+            t::SKY,
+            t::SKY_WASH,
+        );
     }
 
     fn view_build(&mut self, ui: &mut egui::Ui, now: f64) {
@@ -1471,9 +1509,9 @@ impl App {
                             )
                             .len()
                         ),
-                            t::EMERALD,
+                            t::SKY,
                         ),
-                        ("Passphrase".into(), "Argon2id, memory-hard".into(), t::EMERALD),
+                        ("Passphrase".into(), "Argon2id, memory-hard".into(), t::SKY),
                         (
                             "Location".into(),
                             if self.protections.location {
@@ -1502,8 +1540,8 @@ impl App {
                         ),
                         (
                             "Repository".into(),
-                            if self.private_repo { "private".into() } else { "PUBLIC".into() },
-                            if self.private_repo { t::EMERALD } else { t::ROSE },
+                            if self.repo_should_be_private() { "private".into() } else { "PUBLIC".into() },
+                            if self.repo_should_be_private() { t::SKY } else { t::ROSE },
                         ),
                     ];
 
@@ -1676,7 +1714,7 @@ impl App {
 
         ui.add_space(14.0);
         let mut want_out = false;
-        w::card(ui, "outdir", 96.0, t::SKY, false, false, |ui, _r, _l| {
+        w::card_plain(ui, "outdir", 88.0, t::SKY, false, |ui, _r, _l| {
             ui.label(egui::RichText::new("EXTRACT TO").size(t::MICRO).color(t::INK_MUTED));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1705,7 +1743,7 @@ impl App {
                         self.run_ok = true;
                         self.run_status = format!("Running as an independent process (pid {pid}).");
                         self.say(now, format!("Launched capsule, pid {pid}."));
-                        self.toast(now, "Capsule launched", t::EMERALD);
+                        self.toast(now, "Capsule launched", t::SKY);
                     }
                     Err(e) => {
                         self.run_ok = false;
@@ -1722,12 +1760,12 @@ impl App {
             ui.label(
                 egui::RichText::new(&self.run_status)
                     .size(t::SMALL)
-                    .color(if self.run_ok { t::EMERALD } else { t::ROSE }),
+                    .color(if self.run_ok { t::SKY } else { t::ROSE }),
             );
         }
 
         ui.add_space(10.0);
-        w::note(ui, "The capsule authorizes itself. This application grants it nothing and never sees its passphrase.", t::EMERALD, t::alpha(t::EMERALD, 0.08));
+        w::note(ui, "The capsule authorizes itself. This application grants it nothing and never sees its passphrase.", t::SKY, t::alpha(t::SKY, 0.08));
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(nyedarch_core::launch::terminal_hint())
@@ -1933,7 +1971,7 @@ impl App {
                 Ok(()) => {
                     self.run_status.clear();
                     self.run_ok = false;
-                    self.toast(now, "Capsule ready", t::EMERALD);
+                    self.toast(now, "Capsule ready", t::SKY);
                     self.say(now, format!("Loaded {}", path.display()));
                     self.dropped_capsule = Some(path);
                 }
@@ -2084,11 +2122,11 @@ impl eframe::App for App {
         // the one screen where nothing should distract from a decision.
         if self.eula_accepted {
             let (speed, intensity) = if self.building {
-                (0.42, 1.0)
+                (1.15, 1.0)
             } else if self.build_progress >= 1.0 {
-                (0.10, 0.85)
+                (0.26, 0.85)
             } else {
-                (0.055, 0.78)
+                (0.20, 0.78)
             };
             // Ease between speeds so a build starting or finishing accelerates
             // smoothly rather than jumping.
@@ -2104,9 +2142,33 @@ impl eframe::App for App {
     }
 }
 
+/// The application icon, compiled in so there is no file to lose.
+///
+/// Used for the window, the taskbar and the dock. The macOS bundle and the
+/// Windows executable get their own copies from `assets/icon` at packaging
+/// time, because those platforms read an icon from the bundle rather than from
+/// the running process.
+fn load_icon() -> egui::IconData {
+    let bytes = include_bytes!("../assets/icon-256.png");
+    match image_from_png(bytes) {
+        Some(icon) => icon,
+        // An icon is cosmetic: failing to decode it must never stop the client
+        // from starting.
+        None => egui::IconData { rgba: vec![0; 4], width: 1, height: 1 },
+    }
+}
+
+/// Minimal PNG decode via the `image` crate if present, else a 1x1 fallback.
+fn image_from_png(bytes: &[u8]) -> Option<egui::IconData> {
+    let img = image::load_from_memory(bytes).ok()?.into_rgba8();
+    let (width, height) = img.dimensions();
+    Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
 fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_icon(load_icon())
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([940.0, 640.0])
             .with_title("NYEDArch"),

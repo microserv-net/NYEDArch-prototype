@@ -49,7 +49,9 @@ pub fn info_plist(version: &str) -> String {
   <key>CFBundleVersion</key><string>{version}</string>
   <key>CFBundleShortVersionString</key><string>{version}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>{APP}</string>
+  <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleExecutable</key><string>{APP}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <!-- Shown by macOS in its own permission prompt. Location is optional and is
@@ -105,6 +107,9 @@ pub fn bundle_destination(item: &str) -> Option<String> {
         "bin" => return None, // handled file by file
         "runtime-src" => "Contents/Resources/runtime-src".to_string(),
         "docs" => "Contents/Resources/docs".to_string(),
+        // macOS reads the icon from the bundle, not from the running process,
+        // so it has to be placed rather than compiled in.
+        "AppIcon.icns" | "icon.png" => "Contents/Resources/AppIcon.icns".to_string(),
         "install" | "install.exe" => "Contents/MacOS/install".to_string(),
         MANIFEST => format!("Contents/{MANIFEST}"),
         other => format!("Contents/Resources/{other}"),
@@ -742,7 +747,9 @@ mod bundle_tests {
     #[test]
     fn info_plist_executable_matches_the_bundle_name() {
         let p = info_plist("0.0.1");
-        assert!(p.contains(&format!("<key>CFBundleExecutable</key><string>{APP}</string>")));
+        assert!(p.contains(&format!("<key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleExecutable</key><string>{APP}</string>")));
         assert!(p.contains(&format!("<key>CFBundleIdentifier</key><string>{BUNDLE_ID}</string>")));
         assert!(p.contains("<key>CFBundlePackageType</key><string>APPL</string>"));
     }

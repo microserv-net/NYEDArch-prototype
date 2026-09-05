@@ -118,6 +118,16 @@ pub fn run_logs(token: &str, owner: &str, repo: &str, run_id: u64) -> HttpReques
 }
 
 /// Status of a single workflow run, for waiting on completion.
+/// The account a token belongs to.
+pub fn authenticated_user(token: &str) -> HttpRequest {
+    HttpRequest {
+        method: Method::Get,
+        url: format!("{API}/user"),
+        headers: auth_headers(token),
+        body: Vec::new(),
+    }
+}
+
 pub fn get_run(token: &str, owner: &str, repo: &str, run_id: u64) -> HttpRequest {
     HttpRequest {
         method: Method::Get,

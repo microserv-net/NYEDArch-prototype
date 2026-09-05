@@ -6,9 +6,17 @@
 use std::fs;
 use std::path::PathBuf;
 
+/// Unique per call.
+///
+/// A timestamp is not enough. Windows' clock granularity is coarse, so two
+/// calls in a tight loop can return the same value and share a directory - and
+/// then one iteration reads another's output. An atomic counter cannot collide.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn tmpdir() -> PathBuf {
     let mut d = std::env::temp_dir();
-    let uniq = format!("nyeda-rt-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+    let n = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let uniq = format!("nyeda-rt-{}-{}-{}", std::process::id(), n, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
     d.push(uniq);
     std::fs::create_dir_all(&d).unwrap();
     d

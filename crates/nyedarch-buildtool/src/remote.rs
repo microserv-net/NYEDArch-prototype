@@ -213,6 +213,35 @@ fn source_commitment(files: &[(String, Vec<u8>)]) -> [u8; 32] {
     h.finalize().into()
 }
 
+/// Who does this token belong to?
+///
+/// The build repository lives under an account, and the API needs to know
+/// which. Asking the user to type it is asking them to repeat something the
+/// token already proves - and to get it wrong. This reads the login from the
+/// token itself, so the field can be shown as a fact rather than a question.
+pub fn resolve_owner(token: Option<String>) -> Result<String, String> {
+    let token = token.or_else(self::token).ok_or_else(|| {
+        "no GitHub token found. Set NYEDARCH_GITHUB_TOKEN (preferred) or GITHUB_TOKEN.".to_string()
+    })?;
+    let transport = CurlTransport::new();
+    if !transport.available() {
+        return Err("`curl` was not found; it is used as the HTTP transport.".to_string());
+    }
+    let r = transport
+        .send(&nyedarch_github::endpoints::authenticated_user(&token))
+        .map_err(|e| format!("could not identify the token's account: {e}"))?;
+    if !(200..300).contains(&r.status) {
+        return Err(format!("GitHub refused the token ({})", r.status));
+    }
+    let body = String::from_utf8_lossy(&r.body);
+    // "login" is the account name the repository will be created under.
+    let i = body.find("\"login\"").ok_or("no login in the response")? + 7;
+    let rest = body[i..].trim_start().trim_start_matches(':').trim_start();
+    let rest = rest.strip_prefix('"').ok_or("unexpected response shape")?;
+    let end = rest.find('"').ok_or("unexpected response shape")?;
+    Ok(rest[..end].to_string())
+}
+
 /// Change a repository's visibility.
 ///
 /// Refused while a build is running (spec §38). The check asks GitHub whether a

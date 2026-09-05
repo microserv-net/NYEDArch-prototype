@@ -47,15 +47,10 @@ pub const SKY_WASH: Color32 = Color32::from_rgb(0xE8, 0xF6, 0xFE);
 pub const VIOLET: Color32 = Color32::from_rgb(0x7C, 0x3A, 0xED);
 pub const VIOLET_BRIGHT: Color32 = Color32::from_rgb(0xA7, 0x8B, 0xFA);
 
-/// A protection that is engaged.
-pub const EMERALD: Color32 = Color32::from_rgb(0x05, 0x96, 0x69);
-pub const EMERALD_WASH: Color32 = Color32::from_rgb(0xE7, 0xF8, 0xF1);
 /// Attention, not danger.
 pub const AMBER: Color32 = Color32::from_rgb(0xD9, 0x77, 0x06);
-pub const AMBER_WASH: Color32 = Color32::from_rgb(0xFE, 0xF5, 0xE7);
 /// Refusal, or an irreversible consequence.
 pub const ROSE: Color32 = Color32::from_rgb(0xE1, 0x1D, 0x48);
-pub const ROSE_WASH: Color32 = Color32::from_rgb(0xFE, 0xEC, 0xF0);
 
 // -------------------------------------------------------------------- text --
 

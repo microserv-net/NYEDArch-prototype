@@ -74,24 +74,61 @@ fn drop_shadow(painter: &egui::Painter, rect: Rect, strength: f32) {
 
 // ------------------------------------------------------- the perimeter pulse
 
-/// A point at fraction `t` (0..1) along the perimeter of a rounded rect.
+/// Corner radius of the light's path. Matches the window's own corners so the
+/// comet turns with the frame instead of cutting across it.
+const PULSE_RADIUS: f32 = 12.0;
+
+/// A point at fraction `t` (0..1) along a **rounded** rectangle's perimeter.
 ///
-/// Corners are approximated by the straight path; at a 2 px stroke the
-/// difference is invisible and the arithmetic stays trivial.
+/// A square path looked wrong against a rounded window: the light cut the
+/// corner while the frame curved away from it. Travelling an arc through each
+/// corner makes the two agree.
 fn perimeter_point(r: Rect, t: f32) -> Pos2 {
-    let w = r.width();
-    let h = r.height();
-    let per = 2.0 * (w + h);
-    let d = (t.rem_euclid(1.0)) * per;
-    if d < w {
-        pos2(r.left() + d, r.top())
-    } else if d < w + h {
-        pos2(r.right(), r.top() + (d - w))
-    } else if d < 2.0 * w + h {
-        pos2(r.right() - (d - w - h), r.bottom())
-    } else {
-        pos2(r.left(), r.bottom() - (d - 2.0 * w - h))
+    let rad = PULSE_RADIUS.min(r.width() * 0.5).min(r.height() * 0.5);
+    let sw = r.width() - 2.0 * rad; // straight run, horizontal
+    let sh = r.height() - 2.0 * rad; // straight run, vertical
+    let arc = std::f32::consts::FRAC_PI_2 * rad; // one quarter turn
+    let per = 2.0 * (sw + sh) + 4.0 * arc;
+    let mut d = t.rem_euclid(1.0) * per;
+
+    // Top edge, left to right.
+    if d < sw {
+        return pos2(r.left() + rad + d, r.top());
     }
+    d -= sw;
+    if d < arc {
+        let a = -std::f32::consts::FRAC_PI_2 + (d / arc) * std::f32::consts::FRAC_PI_2;
+        let c = pos2(r.right() - rad, r.top() + rad);
+        return pos2(c.x + rad * a.cos(), c.y + rad * a.sin());
+    }
+    d -= arc;
+    if d < sh {
+        return pos2(r.right(), r.top() + rad + d);
+    }
+    d -= sh;
+    if d < arc {
+        let a = (d / arc) * std::f32::consts::FRAC_PI_2;
+        let c = pos2(r.right() - rad, r.bottom() - rad);
+        return pos2(c.x + rad * a.cos(), c.y + rad * a.sin());
+    }
+    d -= arc;
+    if d < sw {
+        return pos2(r.right() - rad - d, r.bottom());
+    }
+    d -= sw;
+    if d < arc {
+        let a = std::f32::consts::FRAC_PI_2 + (d / arc) * std::f32::consts::FRAC_PI_2;
+        let c = pos2(r.left() + rad, r.bottom() - rad);
+        return pos2(c.x + rad * a.cos(), c.y + rad * a.sin());
+    }
+    d -= arc;
+    if d < sh {
+        return pos2(r.left(), r.bottom() - rad - d);
+    }
+    d -= sh;
+    let a = std::f32::consts::PI + (d / arc) * std::f32::consts::FRAC_PI_2;
+    let c = pos2(r.left() + rad, r.top() + rad);
+    pos2(c.x + rad * a.cos(), c.y + rad * a.sin())
 }
 
 /// The signature element: a thin comet of blacklight that circles the window
@@ -112,7 +149,7 @@ pub fn perimeter_pulse_at(ctx: &egui::Context, phase: f64, intensity: f32) {
     // gap, and still nothing is clipped. Insetting further left a visible
     // margin between the light and the frame, which broke the illusion that
     // the window itself is glowing.
-    let r = ctx.screen_rect().shrink(1.25);
+    let r = ctx.screen_rect().shrink(0.75);
     if r.width() < 40.0 || r.height() < 40.0 {
         return;
     }
@@ -308,48 +345,63 @@ pub fn card(
     resp
 }
 
-/// A card with a tinted background.
+/// A card with an outline and no fill.
 ///
-/// Used where the *consequence* of a setting should be visible before the
-/// switch is touched: a one-shot capsule destroys itself, a public repository
-/// exposes its logs. A tint states that without a warning icon or extra prose.
-#[allow(clippy::too_many_arguments)]
-pub fn card_tinted(
+/// Used for the mandatory protections. A tinted card said "this is special" by
+/// flooding a third of the screen with colour; an outline says the same thing
+/// with a single line, and keeps the surface white so the text is the loudest
+/// thing on it.
+pub fn card_outlined(
     ui: &mut Ui,
     id_salt: &str,
     height: f32,
     accent: Color32,
-    tint: Color32,
-    selected: bool,
-    clickable: bool,
     body: impl FnOnce(&mut Ui, Rect, f32),
 ) -> Response {
     let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(
-        vec2(width, height),
-        if clickable { Sense::click() } else { Sense::hover() },
-    );
-    let id = ui.id().with(id_salt);
-    let hov = ui.ctx().animate_bool_with_time(id, resp.hovered() && clickable, 0.14);
-    let sel = ui.ctx().animate_bool_with_time(id.with("s"), selected, 0.22);
-    let lift = t::ease_out_cubic(hov);
-
-    drop_shadow(ui.painter(), rect, 0.3 + 0.6 * lift);
-    // The tint only appears once the setting is on, so an unselected card stays
-    // calm rather than shouting about something that has not happened.
-    let bg = t::mix(t::SURFACE, tint, sel);
-    ui.painter().rect_filled(rect, t::card_rounding(), bg);
-    let edge = t::mix(t::LINE, accent, (lift * 0.5 + sel * 0.9).min(1.0));
-    ui.painter().rect_stroke(rect, t::card_rounding(), Stroke::new(1.0, edge));
-    if sel > 0.01 {
-        let h = rect.height() * 0.46 * t::ease_out_cubic(sel);
-        let bar = Rect::from_center_size(pos2(rect.left() + 2.0, rect.center().y), vec2(3.0, h));
-        ui.painter().rect_filled(bar, Rounding::same(2.0), accent);
-    }
-
-    let content = rect.shrink2(vec2(18.0, 14.0));
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    drop_shadow(ui.painter(), rect, 0.25);
+    ui.painter().rect_filled(rect, t::card_rounding(), t::SURFACE);
+    ui.painter()
+        .rect_stroke(rect, t::card_rounding(), Stroke::new(1.4, t::alpha(accent, 0.85)));
+    let content = rect.shrink2(vec2(18.0, 10.0));
     let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::Min));
-    body(&mut child, rect, lift);
+    let _ = ui.id().with(id_salt);
+    body(&mut child, rect, 0.0);
+    resp
+}
+
+/// A plain card: no outline until it is selected, and no fill ever.
+///
+/// Optional settings should look inert until they are switched on. A permanent
+/// border around every one of them turns a list of choices into a stack of
+/// boxes.
+pub fn card_plain(
+    ui: &mut Ui,
+    id_salt: &str,
+    height: f32,
+    accent: Color32,
+    selected: bool,
+    body: impl FnOnce(&mut Ui, Rect, f32),
+) -> Response {
+    let width = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let id = ui.id().with(id_salt);
+    let sel = ui.ctx().animate_bool_with_time(id.with("s"), selected, 0.2);
+    let hov = ui.ctx().animate_bool_with_time(id, resp.hovered(), 0.14);
+
+    drop_shadow(ui.painter(), rect, 0.22 + 0.3 * hov);
+    ui.painter().rect_filled(rect, t::card_rounding(), t::SURFACE);
+    // The outline fades in with selection rather than being always present.
+    let edge = t::mix(t::LINE, accent, sel);
+    ui.painter().rect_stroke(
+        rect,
+        t::card_rounding(),
+        Stroke::new(1.0 + 0.4 * sel, edge),
+    );
+    let content = rect.shrink2(vec2(18.0, 10.0));
+    let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::Min));
+    body(&mut child, rect, hov);
     resp
 }
 
@@ -369,7 +421,9 @@ pub fn switch(ui: &mut Ui, id_salt: &str, on: &mut bool, locked: bool) -> Respon
     let e = t::ease_out_back(a).clamp(0.0, 1.12);
     let hov = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered() && !locked, 0.12);
 
-    let on_col = if locked { t::EMERALD } else { t::SKY };
+    // Locked and unlocked share the accent: a second hue for "mandatory" added
+    // a colour without adding information, and the keyhole ring already says it.
+    let on_col = if locked { t::SKY_DEEP } else { t::SKY };
     let track = t::mix(t::SUNKEN, on_col, if *on { 0.88 } else { 0.0 });
     let r = Rounding::same(rect.height() / 2.0);
     ui.painter().rect_filled(rect, r, track);
@@ -432,7 +486,7 @@ pub fn posture_ring(ui: &mut Ui, size: f32, active: usize, total: usize, time: f
             }
             let b0 = a0 + (a1 - a0) * f0;
             let b1 = a0 + (a1 - a0) * f1;
-            let c = t::mix(t::SKY, t::EMERALD, i as f32 / total as f32);
+            let c = t::mix(t::SKY_BRIGHT, t::SKY_DEEP, i as f32 / total as f32);
             ui.painter().line_segment(
                 [
                     pos2(center.x + radius * b0.cos(), center.y + radius * b0.sin()),
@@ -485,7 +539,7 @@ pub fn nav_item(
 
     let mc = pos2(rect.left() + 26.0, rect.center().y);
     if done {
-        ui.painter().circle_filled(mc, 9.0, t::EMERALD);
+        ui.painter().circle_filled(mc, 9.0, t::SKY);
         let s = 4.4;
         for seg in [
             [pos2(mc.x - s * 0.75, mc.y + 0.2), pos2(mc.x - s * 0.1, mc.y + s * 0.62)],
@@ -645,12 +699,12 @@ pub fn drop_zone(ui: &mut Ui, height: f32, armed: bool, filled: Option<&str>, ti
         .ctx()
         .animate_bool_with_time(ui.id().with("dropzone"), armed, 0.18);
     let has = filled.is_some();
-    let accent = if has { t::EMERALD } else { t::SKY };
+    let accent = t::SKY;
 
     ui.painter().rect_filled(
         rect,
         t::card_rounding(),
-        t::mix(t::SURFACE, if has { t::EMERALD_WASH } else { t::SKY_WASH }, 0.35 + 0.65 * a.max(has as u8 as f32)),
+        t::SURFACE,
     );
 
     if a < 0.99 && !has {
@@ -742,7 +796,7 @@ pub fn build_indicator(ui: &mut Ui, size: f32, progress: f32, running: bool, tim
                 pos2(center.x + radius * a0.cos(), center.y + radius * a0.sin()),
                 pos2(center.x + radius * a1.cos(), center.y + radius * a1.sin()),
             ],
-            Stroke::new(6.0, t::mix(t::SKY, t::EMERALD, f0)),
+            Stroke::new(6.0, t::mix(t::SKY_BRIGHT, t::SKY_DEEP, f0)),
         );
     }
 
@@ -911,4 +965,70 @@ pub fn slider(ui: &mut Ui, id_salt: &str, value: &mut u32, range: std::ops::Rang
         t::INK_SOFT,
     );
     resp
+}
+
+
+/// How strong is this passphrase?
+///
+/// Returned as a score with a plain-language reason, because "weak" without a
+/// reason is a scold rather than help.
+///
+/// This is a floor, not a scoring system: it rejects the passphrases that make
+/// an offline search trivial. Argon2id does the real work, and no meter can
+/// know whether a phrase appears in someone's wordlist.
+pub fn passphrase_strength(p: &str) -> (f32, &'static str, Color32) {
+    let len = p.chars().count();
+    if len == 0 {
+        return (0.0, "Required. This cannot be disabled.", t::INK_MUTED);
+    }
+    if len < 12 {
+        return (0.15, "Too short. Use at least 12 characters.", t::ROSE);
+    }
+    let lower = p.chars().any(|c| c.is_lowercase());
+    let upper = p.chars().any(|c| c.is_uppercase());
+    let digit = p.chars().any(|c| c.is_ascii_digit());
+    let other = p.chars().any(|c| !c.is_alphanumeric());
+    let classes = [lower, upper, digit, other].iter().filter(|b| **b).count();
+
+    // A single repeated character passes a naive length check.
+    let distinct = {
+        let mut v: Vec<char> = p.chars().collect();
+        v.sort_unstable();
+        v.dedup();
+        v.len()
+    };
+    if distinct < 5 {
+        return (0.2, "Too repetitive. Use more distinct characters.", t::ROSE);
+    }
+    let common = [
+        "password", "passphrase", "qwerty", "letmein", "welcome", "admin",
+        "nyedarch", "123456", "iloveyou", "changeme",
+    ];
+    let low = p.to_ascii_lowercase();
+    if common.iter().any(|c| low.contains(c)) {
+        return (0.2, "Contains a common word. Choose something unpredictable.", t::ROSE);
+    }
+    if len >= 20 && classes >= 2 {
+        return (1.0, "Strong. A long phrase is better than a short complex one.", t::SKY_DEEP);
+    }
+    if len >= 16 || classes >= 3 {
+        return (0.75, "Good.", t::SKY);
+    }
+    (0.45, "Weak. Make it longer, or add another kind of character.", t::AMBER)
+}
+
+/// A thin strength meter under the passphrase field.
+pub fn strength_meter(ui: &mut Ui, width: f32, score: f32, label: &str, colour: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 4.0), Sense::hover());
+    let r = Rounding::same(2.0);
+    ui.painter().rect_filled(rect, r, t::SUNKEN);
+    let shown = ui
+        .ctx()
+        .animate_value_with_time(ui.id().with("pw_strength"), score.clamp(0.0, 1.0), 0.25);
+    if shown > 0.001 {
+        let fill = Rect::from_min_size(rect.min, vec2(rect.width() * shown, rect.height()));
+        ui.painter().rect_filled(fill, r, colour);
+    }
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(label).size(t::MICRO).color(colour));
 }
