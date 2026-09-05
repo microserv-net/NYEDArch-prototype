@@ -179,6 +179,12 @@ struct App {
     cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Creator-mode diagnostics from the last build.
     pending_diagnostics: Vec<String>,
+    /// Accumulated laps for the perimeter pulse.
+    ///
+    /// Integrated rather than derived from the clock, so changing speed changes
+    /// the *rate* and never teleports the comet to a new position.
+    pulse_phase: f64,
+    pulse_last: f64,
     machine_query: String,
     selected_tags: Vec<String>,
     tag_mode_all: bool,
@@ -237,6 +243,8 @@ impl Default for App {
             creator_mode: false,
             cancel_flag: None,
             pending_diagnostics: Vec::new(),
+            pulse_phase: 0.0,
+            pulse_last: 0.0,
             machine_query: String::new(),
             selected_tags: Vec::new(),
             tag_mode_all: false,
@@ -314,7 +322,7 @@ impl App {
             Some(p) => {
                 self.say(now, format!("Source set to {}", p.display()));
                 self.source_path = p.to_string_lossy().to_string();
-                self.toast(now, "Source selected", t::CYAN);
+                self.toast(now, "Source selected", t::SKY);
             }
             None => self.say(now, "Folder selection cancelled."),
         }
@@ -328,7 +336,7 @@ impl App {
             Some(p) => {
                 self.say(now, format!("Source set to {}", p.display()));
                 self.source_path = p.to_string_lossy().to_string();
-                self.toast(now, "Source selected", t::CYAN);
+                self.toast(now, "Source selected", t::SKY);
             }
             None => self.say(now, "File selection cancelled."),
         }
@@ -357,13 +365,13 @@ impl App {
                         self.run_status.clear();
                         self.run_ok = false;
                         self.say(now, format!("Loaded {}", p.display()));
-                        self.toast(now, "Capsule ready", t::MINT);
+                        self.toast(now, "Capsule ready", t::EMERALD);
                         self.dropped_capsule = Some(p);
                     }
                     Err(e) => {
                         self.dropped_capsule = None;
                         self.run_status = format!("Cannot run that file: {e}");
-                        self.toast(now, "Not a capsule", t::CORAL);
+                        self.toast(now, "Not a capsule", t::ROSE);
                     }
                 }
             }
@@ -385,14 +393,14 @@ impl App {
                         now,
                         format!("Imported machine {} labels={:?}", &m.id[..16.min(m.id.len())], m.labels),
                     );
-                    self.toast(now, "Machine verified and added", t::MINT);
+                    self.toast(now, "Machine verified and added", t::EMERALD);
                     self.goto(Step::Machines, now);
                 }
                 Err(e) => {
                     for line in e.lines() {
                         self.say(now, line.to_string());
                     }
-                    self.toast(now, "Record refused", t::CORAL);
+                    self.toast(now, "Record refused", t::ROSE);
                 }
             }
         }
@@ -412,11 +420,11 @@ impl App {
                 Ok(id) => {
                     self.say(now, format!("Exported {} to {}", &id[..16.min(id.len())], p.display()));
                     self.say(now, "The record is authenticated; editing it invalidates it.");
-                    self.toast(now, "Machine exported", t::MINT);
+                    self.toast(now, "Machine exported", t::EMERALD);
                 }
                 Err(e) => {
                     self.say(now, format!("Export failed: {e}"));
-                    self.toast(now, "Export failed", t::CORAL);
+                    self.toast(now, "Export failed", t::ROSE);
                 }
             }
         }
@@ -427,7 +435,7 @@ impl App {
     fn apply_visibility(&mut self, now: f64) {
         if self.gh_owner.trim().is_empty() || self.gh_repo.trim().is_empty() {
             self.say(now, "Set the GitHub owner and repository first.");
-            self.toast(now, "GitHub details missing", t::CORAL);
+            self.toast(now, "GitHub details missing", t::ROSE);
             return;
         }
         let token = if self.gh_token.trim().is_empty() { None } else { Some(self.gh_token.trim().to_string()) };
@@ -444,13 +452,13 @@ impl App {
                     self.say(now, "A public repository exposes your build logs and workflow to anyone.");
                     self.say(now, "The capsule source stays encrypted either way; the key remains a repository secret.");
                 }
-                self.toast(now, format!("Repository is {word}"), if self.private_repo { t::MINT } else { t::CORAL });
+                self.toast(now, format!("Repository is {word}"), if self.private_repo { t::EMERALD } else { t::ROSE });
             }
             Err(e) => {
                 for line in e.lines() {
                     self.say(now, line.to_string());
                 }
-                self.toast(now, "Visibility unchanged", t::CORAL);
+                self.toast(now, "Visibility unchanged", t::ROSE);
             }
         }
     }
@@ -467,7 +475,7 @@ impl App {
         let source = std::path::PathBuf::from(self.source_path.trim());
         if !source.exists() {
             self.say(now, format!("Source does not exist: {}", source.display()));
-            self.toast(now, "Source not found", t::CORAL);
+            self.toast(now, "Source not found", t::ROSE);
             return;
         }
 
@@ -496,7 +504,7 @@ impl App {
                 }),
                 None => {
                     self.say(now, "Time must be HH:MM.");
-                    self.toast(now, "Invalid time", t::CORAL);
+                    self.toast(now, "Invalid time", t::ROSE);
                     return;
                 }
             }
@@ -547,7 +555,7 @@ impl App {
             if self.gh_token.trim().is_empty() || self.gh_owner.trim().is_empty() {
                 self.say(now, "Remote build is on but the GitHub owner or token is missing.");
                 self.say(now, "Set them under Targets, or turn remote build off to build locally.");
-                self.toast(now, "GitHub details missing", t::CORAL);
+                self.toast(now, "GitHub details missing", t::ROSE);
                 return;
             }
             Some((
@@ -656,7 +664,7 @@ impl App {
                     for d in std::mem::take(&mut self.pending_diagnostics) {
                         self.say(now, format!("  {d}"));
                     }
-                    self.toast(now, "Capsule project created", t::MINT);
+                    self.toast(now, "Capsule project created", t::EMERALD);
                 }
                 BuildMsg::Failed(e) => {
                     self.building = false;
@@ -666,7 +674,7 @@ impl App {
                     for line in e.lines() {
                         self.say(now, line.to_string());
                     }
-                    self.toast(now, "Build failed", t::CORAL);
+                    self.toast(now, "Build failed", t::ROSE);
                 }
             }
         }
@@ -699,7 +707,7 @@ impl App {
                 let r = ui.max_rect();
                 ui.painter().line_segment(
                     [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
-                    Stroke::new(1.0, t::EDGE),
+                    Stroke::new(1.0, t::LINE),
                 );
 
                 egui::menu::bar(ui, |ui| {
@@ -745,7 +753,7 @@ impl App {
                             // so this simply reports what it now is.
                             let fp = nyedarch_fingerprint::capture();
                             self.say(now, format!("This machine is {}", &fp.id_hex()[..16]));
-                            self.toast(now, "Fingerprint recaptured", t::MINT);
+                            self.toast(now, "Fingerprint recaptured", t::EMERALD);
                             ui.close_menu();
                         }
                     });
@@ -769,7 +777,7 @@ impl App {
                             .clicked()
                             && self.protections.one_shot
                         {
-                            self.toast(now, "Deletion cannot be guaranteed on SSDs", t::CORAL);
+                            self.toast(now, "Deletion cannot be guaranteed on SSDs", t::ROSE);
                         }
                     });
 
@@ -812,14 +820,14 @@ impl App {
                     // Right-aligned live status.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (label, colour) = if self.building {
-                            ("building", t::CYAN)
+                            ("building", t::SKY)
                         } else if self.build_progress >= 1.0 {
-                            ("sealed", t::MINT)
+                            ("sealed", t::EMERALD)
                         } else {
-                            ("idle", t::MUTED)
+                            ("idle", t::INK_MUTED)
                         };
                         let p = ui.cursor().min + vec2(-72.0, 4.0);
-                        w::pill(ui, p, label, colour);
+                        w::pill(ui.painter(), p, label, colour, t::alpha(colour, 0.12));
                         ui.add_space(78.0);
                     });
                 });
@@ -845,8 +853,7 @@ impl App {
                 let (logo_rect, _) =
                     ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
                 let open = self.active_protections() as f32 / 4.0;
-                w::aperture(
-                    ui,
+                w::aperture(ui.painter(),
                     pos2(logo_rect.left() + 23.0, logo_rect.center().y),
                     44.0,
                     now,
@@ -858,19 +865,19 @@ impl App {
                     Align2::LEFT_CENTER,
                     "NYEDArch",
                     t::font(19.0),
-                    t::TEXT,
+                    t::INK,
                 );
                 ui.painter().text(
                     pos2(logo_rect.left() + 52.0, logo_rect.center().y + 10.0),
                     Align2::LEFT_CENTER,
                     "Not Your Everyday Archive",
                     t::font(t::MICRO),
-                    t::MUTED,
+                    t::INK_MUTED,
                 );
 
                 ui.add_space(12.0);
                 let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-                ui.painter().rect_filled(r, Rounding::ZERO, t::EDGE);
+                ui.painter().rect_filled(r, Rounding::ZERO, t::LINE);
                 ui.add_space(10.0);
 
                 // Sliding active indicator, painted before the items.
@@ -881,8 +888,8 @@ impl App {
                     .ctx()
                     .animate_value_with_time(egui::Id::new("rail_ind"), target_y, 0.22);
                 let ind = Rect::from_min_size(pos2(ui.min_rect().left() - 8.0, y + 9.0), vec2(3.0, 32.0));
-                ui.painter().rect_filled(ind, Rounding::same(2.0), t::CYAN);
-                w::glow(ui, ind.center(), 20.0, t::CYAN, 0.4);
+                ui.painter().rect_filled(ind, Rounding::same(2.0), t::SKY);
+                w::glow(ui.painter(), ind.center(), 20.0, t::SKY, 0.4);
 
                 let mut clicked = None;
                 for (i, s) in Step::ALL.iter().enumerate() {
@@ -900,10 +907,10 @@ impl App {
                     ui.label(
                         egui::RichText::new("protections engaged")
                             .size(t::MICRO)
-                            .color(t::MUTED),
+                            .color(t::INK_MUTED),
                     );
                     ui.add_space(2.0);
-                    w::posture_meter(ui, 104.0, self.active_protections(), 4, now);
+                    w::posture_ring(ui, 104.0, self.active_protections(), 4, now);
                 });
             });
     }
@@ -921,15 +928,15 @@ impl App {
 
         let mut want_folder = false;
         let mut want_file = false;
-        w::glass_card(
+        w::card(
             ui,
             "src",
             126.0,
-            t::CYAN,
+            t::SKY,
             !self.source_path.is_empty(),
             false,
             |ui, _r, _l| {
-                ui.label(egui::RichText::new("SOURCE").size(t::MICRO).color(t::MUTED));
+                ui.label(egui::RichText::new("SOURCE").size(t::MICRO).color(t::INK_MUTED));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let w = ui.available_width() - 210.0;
@@ -952,7 +959,7 @@ impl App {
                         "Directory structure, permissions and symlinks are preserved.",
                     )
                     .size(t::MICRO)
-                    .color(t::MUTED),
+                    .color(t::INK_MUTED),
                 );
             },
         );
@@ -967,15 +974,15 @@ impl App {
 
         let cards = [
             ("Sealed", "Compressed and encrypted in bounded chunks. Nothing plaintext is written.", t::VIOLET),
-            ("Bound", "Tied to this build. A payload cannot be moved into another capsule.", t::CYAN),
-            ("Standalone", "No reader, no server, no network. The capsule carries everything.", t::MINT),
+            ("Bound", "Tied to this build. A payload cannot be moved into another capsule.", t::SKY),
+            ("Standalone", "No reader, no server, no network. The capsule carries everything.", t::EMERALD),
         ];
         let cw = (ui.available_width() - 20.0) / 3.0;
         ui.horizontal(|ui| {
             for (i, (title, body, accent)) in cards.iter().enumerate() {
                 let (rect, _) = ui.allocate_exact_size(vec2(cw, 104.0), Sense::hover());
                 ui.painter()
-                    .rect(rect, t::card_rounding(), t::alpha(t::GLASS, 0.85), t::hairline());
+                    .rect(rect, t::card_rounding(), t::alpha(t::SURFACE, 0.85), t::hairline());
                 let bar = Rect::from_min_size(rect.min + vec2(16.0, 16.0), vec2(24.0, 3.0));
                 ui.painter().rect_filled(bar, Rounding::same(2.0), *accent);
                 ui.painter().text(
@@ -983,12 +990,12 @@ impl App {
                     Align2::LEFT_TOP,
                     *title,
                     t::font(t::H_SECTION),
-                    t::TEXT,
+                    t::INK,
                 );
                 let galley =
                     ui.painter()
-                        .layout(body.to_string(), t::font(t::SMALL), t::TEXT_DIM, cw - 32.0);
-                ui.painter().galley(rect.min + vec2(16.0, 52.0), galley, t::TEXT_DIM);
+                        .layout(body.to_string(), t::font(t::SMALL), t::INK_SOFT, cw - 32.0);
+                ui.painter().galley(rect.min + vec2(16.0, 52.0), galley, t::INK_SOFT);
                 if i < 2 {
                     ui.add_space(10.0 - ui.spacing().item_spacing.x);
                 }
@@ -1004,40 +1011,40 @@ impl App {
         );
 
         let mut machine = self.protections.machine;
-        w::glass_card(ui, "p_machine", 84.0, t::MINT, true, false, |ui, rect, _l| {
+        w::card(ui, "p_machine", 84.0, t::EMERALD, true, false, |ui, rect, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Machine").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(egui::RichText::new("Machine").size(t::H_SECTION).color(t::INK));
                     ui.label(
                         egui::RichText::new("Opens only on trusted machines. Cannot be disabled.")
                             .size(t::SMALL)
-                            .color(t::TEXT_DIM),
+                            .color(t::INK_SOFT),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::protection_switch(ui, "sw_machine", &mut machine, true);
+                    w::switch(ui, "sw_machine", &mut machine, true);
                 });
             });
-            w::pill(ui, pos2(rect.left() + 100.0, rect.top() + 14.0), "always on", t::MINT);
+            w::pill(ui.painter(), pos2(rect.left() + 100.0, rect.top() + 14.0), "always on", t::EMERALD, t::alpha(t::EMERALD, 0.12));
         });
 
         ui.add_space(8.0);
         let mut pass_on = self.protections.passphrase;
-        w::glass_card(ui, "p_pass", 122.0, t::MINT, true, false, |ui, rect, _l| {
+        w::card(ui, "p_pass", 122.0, t::EMERALD, true, false, |ui, rect, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Passphrase").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(egui::RichText::new("Passphrase").size(t::H_SECTION).color(t::INK));
                     ui.label(
                         egui::RichText::new("Memory-hard Argon2id with a per-capsule salt.")
                             .size(t::SMALL)
-                            .color(t::TEXT_DIM),
+                            .color(t::INK_SOFT),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::protection_switch(ui, "sw_pass", &mut pass_on, true);
+                    w::switch(ui, "sw_pass", &mut pass_on, true);
                 });
             });
-            w::pill(ui, pos2(rect.left() + 132.0, rect.top() + 14.0), "always on", t::MINT);
+            w::pill(ui.painter(), pos2(rect.left() + 132.0, rect.top() + 14.0), "always on", t::EMERALD, t::alpha(t::EMERALD, 0.12));
             ui.add_space(8.0);
             ui.add_sized(
                 vec2(ui.available_width(), 32.0),
@@ -1049,29 +1056,29 @@ impl App {
         });
 
         ui.add_space(16.0);
-        ui.label(egui::RichText::new("OPTIONAL").size(t::MICRO).color(t::MUTED));
+        ui.label(egui::RichText::new("OPTIONAL").size(t::MICRO).color(t::INK_MUTED));
         ui.add_space(6.0);
 
         let mut loc = self.protections.location;
         let loc_h = if loc { 130.0 } else { 84.0 };
-        w::glass_card(ui, "p_loc", loc_h, t::CYAN, loc, false, |ui, _r, _l| {
+        w::card(ui, "p_loc", loc_h, t::SKY, loc, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Location").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(egui::RichText::new("Location").size(t::H_SECTION).color(t::INK));
                     ui.label(
                         egui::RichText::new("Acquired automatically. A vague fix is refused.")
                             .size(t::SMALL)
-                            .color(t::TEXT_DIM),
+                            .color(t::INK_SOFT),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::protection_switch(ui, "sw_loc", &mut loc, false);
+                    w::switch(ui, "sw_loc", &mut loc, false);
                 });
             });
             if loc {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Within").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.label(egui::RichText::new("Within").size(t::SMALL).color(t::INK_SOFT));
                     ui.add(
                         egui::Slider::new(&mut self.protections.location_tolerance_m, 25..=1000)
                             .suffix(" m")
@@ -1081,7 +1088,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("A reading less accurate than this is refused, not accepted.")
                         .size(t::MICRO)
-                        .color(t::MUTED),
+                        .color(t::INK_MUTED),
                 );
             }
         });
@@ -1090,31 +1097,31 @@ impl App {
         ui.add_space(8.0);
         let mut tm = self.protections.time;
         let time_h = if tm { 140.0 } else { 84.0 };
-        w::glass_card(ui, "p_time", time_h, t::CYAN, tm, false, |ui, _r, _l| {
+        w::card(ui, "p_time", time_h, t::SKY, tm, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("Time window").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(egui::RichText::new("Time window").size(t::H_SECTION).color(t::INK));
                     ui.label(
                         egui::RichText::new("A recurring daily window the capsule checks itself.")
                             .size(t::SMALL)
-                            .color(t::TEXT_DIM),
+                            .color(t::INK_SOFT),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::protection_switch(ui, "sw_time", &mut tm, false);
+                    w::switch(ui, "sw_time", &mut tm, false);
                 });
             });
             if tm {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("At").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.label(egui::RichText::new("At").size(t::SMALL).color(t::INK_SOFT));
                     ui.add_sized(
                         vec2(74.0, 28.0),
                         egui::TextEdit::singleline(&mut self.protections.time_of_day)
                             .margin(vec2(8.0, 5.0)),
                     );
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("give or take").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.label(egui::RichText::new("give or take").size(t::SMALL).color(t::INK_SOFT));
                     ui.add(
                         egui::DragValue::new(&mut self.protections.time_tolerance_min)
                             .clamp_range(1..=180)
@@ -1124,7 +1131,7 @@ impl App {
                 ui.label(
                     egui::RichText::new("Recurring, not an expiry: this repeats every day.")
                         .size(t::MICRO)
-                        .color(t::MUTED),
+                        .color(t::INK_MUTED),
                 );
             }
         });
@@ -1132,24 +1139,24 @@ impl App {
 
         ui.add_space(8.0);
         let mut one = self.protections.one_shot;
-        w::glass_card(ui, "p_shot", 84.0, t::CORAL, one, false, |ui, _r, _l| {
+        w::card_tinted(ui, "p_shot", 84.0, t::ROSE, t::ROSE_WASH, one, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(egui::RichText::new("One-shot capsule").size(t::H_SECTION).color(t::TEXT));
+                    ui.label(egui::RichText::new("One-shot capsule").size(t::H_SECTION).color(t::INK));
                     ui.label(
                         egui::RichText::new("Best-effort self-delete after a verified extraction.")
                             .size(t::SMALL)
-                            .color(t::TEXT_DIM),
+                            .color(t::INK_SOFT),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::protection_switch(ui, "sw_shot", &mut one, false);
+                    w::switch(ui, "sw_shot", &mut one, false);
                 });
             });
         });
         if one != self.protections.one_shot {
             if one {
-                self.toast(now, "Deletion cannot be guaranteed on SSDs", t::CORAL);
+                self.toast(now, "Deletion cannot be guaranteed on SSDs", t::ROSE);
             }
             self.protections.one_shot = one;
         }
@@ -1165,9 +1172,9 @@ impl App {
         );
 
         // Search and tag filter.
-        w::glass_card(ui, "msearch", 118.0, t::CYAN, false, false, |ui, _r, _l| {
+        w::card(ui, "msearch", 118.0, t::SKY, false, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Search").size(t::SMALL).color(t::TEXT_DIM));
+                ui.label(egui::RichText::new("Search").size(t::SMALL).color(t::INK_SOFT));
                 ui.add_sized(
                     vec2(ui.available_width() - 190.0, 28.0),
                     egui::TextEdit::singleline(&mut self.machine_query)
@@ -1187,13 +1194,13 @@ impl App {
                 ui.label(
                     egui::RichText::new("No labels yet. Import a machine record to add some.")
                         .size(t::MICRO)
-                        .color(t::MUTED),
+                        .color(t::INK_MUTED),
                 );
             } else {
                 ui.horizontal_wrapped(|ui| {
                     for lab in labels {
                         let on = self.selected_tags.contains(&lab);
-                        let colour = if on { t::MINT } else { t::MUTED };
+                        let colour = if on { t::EMERALD } else { t::INK_MUTED };
                         let galley = ui.painter().layout_no_wrap(
                             lab.clone(),
                             t::font(t::MICRO),
@@ -1226,18 +1233,18 @@ impl App {
         let selected = machines::select(&self.machine_query, &self.selected_tags, mode);
 
         // What the capsule will actually contain (spec §48).
-        w::glass_card(ui, "mcount", 62.0, t::MINT, true, false, |ui, _r, _l| {
+        w::card(ui, "mcount", 62.0, t::EMERALD, true, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("Included machines: {}", selected.len()))
                         .size(t::H_SECTION)
-                        .color(t::TEXT),
+                        .color(t::INK),
                 );
                 ui.add_space(10.0);
                 ui.label(
                     egui::RichText::new("this machine is always included")
                         .size(t::MICRO)
-                        .color(t::MUTED),
+                        .color(t::INK_MUTED),
                 );
             });
         });
@@ -1245,19 +1252,20 @@ impl App {
         ui.add_space(10.0);
 
         for (i, m) in selected.iter().enumerate() {
-            let accent = if m.is_this_machine { t::VIOLET } else { t::MINT };
+            let accent = if m.is_this_machine { t::VIOLET } else { t::EMERALD };
             let id = m.id[..16.min(m.id.len())].to_string();
             let labels = m.labels.join("   ");
             let creator = m.is_this_machine;
-            w::glass_card(ui, &format!("m{i}"), 78.0, accent, creator, false, |ui, rect, _l| {
-                ui.label(egui::RichText::new(&id).size(t::BODY).monospace().color(t::TEXT));
-                ui.label(egui::RichText::new(&labels).size(t::MICRO).color(t::MUTED));
+            w::card(ui, &format!("m{i}"), 78.0, accent, creator, false, |ui, rect, _l| {
+                ui.label(egui::RichText::new(&id).size(t::BODY).monospace().color(t::INK));
+                ui.label(egui::RichText::new(&labels).size(t::MICRO).color(t::INK_MUTED));
                 if creator {
                     w::pill(
-                        ui,
+                        ui.painter(),
                         pos2(rect.right() - 118.0, rect.center().y - 9.0),
                         "this machine",
                         t::VIOLET,
+                        t::alpha(t::VIOLET, 0.12),
                     );
                 }
             });
@@ -1283,11 +1291,7 @@ impl App {
         }
 
         ui.add_space(12.0);
-        w::note(
-            ui,
-            "Records are authenticated. Editing a record's labels invalidates it, so a machine cannot be relabelled into a capsule it was never trusted for.",
-            t::VIOLET,
-        );
+        w::note(ui, "Records are authenticated. Editing a record's labels invalidates it, so a machine cannot be relabelled into a capsule it was never trusted for.", t::VIOLET, t::alpha(t::VIOLET, 0.08));
     }
 
     fn view_targets(&mut self, ui: &mut egui::Ui, now: f64) {
@@ -1305,19 +1309,19 @@ impl App {
         for (i, (name, triple, flag)) in rows.iter_mut().enumerate() {
             let on = **flag;
             let mut local = on;
-            w::glass_card(ui, &format!("tg{i}"), 74.0, t::CYAN, on, false, |ui, _r, _l| {
+            w::card(ui, &format!("tg{i}"), 74.0, t::SKY, on, false, |ui, _r, _l| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label(egui::RichText::new(*name).size(t::H_SECTION).color(t::TEXT));
+                        ui.label(egui::RichText::new(*name).size(t::H_SECTION).color(t::INK));
                         ui.label(
                             egui::RichText::new(*triple)
                                 .size(t::MICRO)
                                 .monospace()
-                                .color(t::MUTED),
+                                .color(t::INK_MUTED),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        w::protection_switch(ui, &format!("swtg{i}"), &mut local, false);
+                        w::switch(ui, &format!("swtg{i}"), &mut local, false);
                     });
                 });
             });
@@ -1327,11 +1331,12 @@ impl App {
 
         ui.add_space(6.0);
         let mut priv_repo = self.private_repo;
-        w::glass_card(
+        w::card_tinted(
             ui,
             "repo",
             86.0,
-            if priv_repo { t::MINT } else { t::CORAL },
+            if priv_repo { t::EMERALD } else { t::ROSE },
+            if priv_repo { t::SURFACE } else { t::AMBER_WASH },
             true,
             false,
             |ui, _r, _l| {
@@ -1340,7 +1345,7 @@ impl App {
                         ui.label(
                             egui::RichText::new("Private repository")
                                 .size(t::H_SECTION)
-                                .color(t::TEXT),
+                                .color(t::INK),
                         );
                         ui.label(
                             egui::RichText::new(if priv_repo {
@@ -1349,11 +1354,11 @@ impl App {
                                 "A public repository exposes your capsule source and build logs."
                             })
                             .size(t::SMALL)
-                            .color(if priv_repo { t::TEXT_DIM } else { t::CORAL }),
+                            .color(if priv_repo { t::INK_SOFT } else { t::ROSE }),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        w::protection_switch(ui, "swrepo", &mut priv_repo, false);
+                        w::switch(ui, "swrepo", &mut priv_repo, false);
                     });
                 });
             },
@@ -1369,7 +1374,7 @@ impl App {
             ui.label(
                 egui::RichText::new("refused while a build is running")
                     .size(t::MICRO)
-                    .color(t::MUTED),
+                    .color(t::INK_MUTED),
             );
         });
         if apply_now {
@@ -1377,36 +1382,36 @@ impl App {
         }
 
         ui.add_space(14.0);
-        ui.label(egui::RichText::new("REMOTE BUILD").size(t::MICRO).color(t::MUTED));
+        ui.label(egui::RichText::new("REMOTE BUILD").size(t::MICRO).color(t::INK_MUTED));
         ui.add_space(6.0);
 
         let mut remote = self.remote_build;
         let h = if remote { 196.0 } else { 84.0 };
-        w::glass_card(ui, "gh", h, t::CYAN, remote, false, |ui, _r, _l| {
+        w::card(ui, "gh", h, t::SKY, remote, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(
                         egui::RichText::new("Build on GitHub Actions")
                             .size(t::H_SECTION)
-                            .color(t::TEXT),
+                            .color(t::INK),
                     );
                     ui.label(
                         egui::RichText::new(
                             "The capsule shell is compiled remotely into per-platform binaries.",
                         )
                         .size(t::SMALL)
-                        .color(t::TEXT_DIM),
+                        .color(t::INK_SOFT),
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    w::protection_switch(ui, "sw_gh", &mut remote, false);
+                    w::switch(ui, "sw_gh", &mut remote, false);
                 });
             });
 
             if remote {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Owner").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.label(egui::RichText::new("Owner").size(t::SMALL).color(t::INK_SOFT));
                     ui.add_sized(
                         vec2(150.0, 28.0),
                         egui::TextEdit::singleline(&mut self.gh_owner)
@@ -1414,7 +1419,7 @@ impl App {
                             .margin(vec2(8.0, 5.0)),
                     );
                     ui.add_space(10.0);
-                    ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::INK_SOFT));
                     ui.add_sized(
                         vec2(170.0, 28.0),
                         egui::TextEdit::singleline(&mut self.gh_repo).margin(vec2(8.0, 5.0)),
@@ -1422,7 +1427,7 @@ impl App {
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::TEXT_DIM));
+                    ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT));
                     ui.add_sized(
                         vec2(ui.available_width() - 10.0, 28.0),
                         egui::TextEdit::singleline(&mut self.gh_token)
@@ -1438,7 +1443,7 @@ impl App {
                          and it is passed to curl on stdin so it cannot appear in the process list.",
                     )
                     .size(t::MICRO)
-                    .color(t::MUTED),
+                    .color(t::INK_MUTED),
                 );
             }
         });
@@ -1452,8 +1457,7 @@ impl App {
                  public or private, and the key is stored as a repository secret only the build \
                  runner can read. GitHub never receives your files, passphrase, fingerprints or any \
                  payload key.",
-                t::VIOLET,
-            );
+                t::VIOLET, t::alpha(t::VIOLET, 0.08));
         }
     }
 
@@ -1470,7 +1474,7 @@ impl App {
                 egui::Layout::top_down(egui::Align::Center),
                 |ui| {
                     ui.add_space(6.0);
-                    w::seal_indicator(ui, 176.0, self.build_progress, self.building, now);
+                    w::build_indicator(ui, 176.0, self.build_progress, self.building, now);
                     ui.add_space(8.0);
                     let label = if self.building {
                         format!("{:.0}%", self.build_progress * 100.0)
@@ -1479,7 +1483,7 @@ impl App {
                     } else {
                         "Not built".to_string()
                     };
-                    ui.label(egui::RichText::new(label).size(t::H_SECTION).color(t::TEXT));
+                    ui.label(egui::RichText::new(label).size(t::H_SECTION).color(t::INK));
                 },
             );
 
@@ -1505,9 +1509,9 @@ impl App {
                             )
                             .len()
                         ),
-                            t::MINT,
+                            t::EMERALD,
                         ),
-                        ("Passphrase".into(), "Argon2id, memory-hard".into(), t::MINT),
+                        ("Passphrase".into(), "Argon2id, memory-hard".into(), t::EMERALD),
                         (
                             "Location".into(),
                             if self.protections.location {
@@ -1515,7 +1519,7 @@ impl App {
                             } else {
                                 "off".into()
                             },
-                            if self.protections.location { t::CYAN } else { t::MUTED },
+                            if self.protections.location { t::SKY } else { t::INK_MUTED },
                         ),
                         (
                             "Time".into(),
@@ -1527,21 +1531,21 @@ impl App {
                             } else {
                                 "off".into()
                             },
-                            if self.protections.time { t::CYAN } else { t::MUTED },
+                            if self.protections.time { t::SKY } else { t::INK_MUTED },
                         ),
                         (
                             "Execution".into(),
                             if self.protections.one_shot { "one-shot".into() } else { "reusable".into() },
-                            if self.protections.one_shot { t::CORAL } else { t::MUTED },
+                            if self.protections.one_shot { t::ROSE } else { t::INK_MUTED },
                         ),
                         (
                             "Repository".into(),
                             if self.private_repo { "private".into() } else { "PUBLIC".into() },
-                            if self.private_repo { t::MINT } else { t::CORAL },
+                            if self.private_repo { t::EMERALD } else { t::ROSE },
                         ),
                     ];
 
-                    ui.label(egui::RichText::new("SUMMARY").size(t::MICRO).color(t::MUTED));
+                    ui.label(egui::RichText::new("SUMMARY").size(t::MICRO).color(t::INK_MUTED));
                     ui.add_space(4.0);
                     for (i, (k, v, c)) in rows.iter().enumerate() {
                         let (rect, _) =
@@ -1550,7 +1554,7 @@ impl App {
                             ui.painter().rect_filled(
                                 rect,
                                 Rounding::same(8.0),
-                                t::alpha(t::GLASS, 0.75),
+                                t::alpha(t::SURFACE, 0.75),
                             );
                         }
                         ui.painter()
@@ -1560,7 +1564,7 @@ impl App {
                             Align2::LEFT_CENTER,
                             k,
                             t::font(t::SMALL),
-                            t::TEXT_DIM,
+                            t::INK_SOFT,
                         );
                         ui.painter().text(
                             pos2(rect.right() - 10.0, rect.center().y),
@@ -1595,39 +1599,30 @@ impl App {
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             use nyedarch_package::pipeline::CompressionMode as CM;
-            ui.label(egui::RichText::new("Compression").size(t::SMALL).color(t::TEXT_DIM));
-            for m in [CM::Automatic, CM::Balanced, CM::Maximum, CM::Fast] {
-                let on = self.compression == m;
-                if w::ghost_button(ui, &format!("cm{}", m.label()), m.label(), 96.0).clicked() {
-                    self.compression = m;
-                }
-                if on {
-                    // Mark the active choice; ghost buttons do not carry state.
-                    let r = ui.min_rect();
-                    let _ = r;
-                }
+            ui.label(egui::RichText::new("Compression").size(t::SMALL).color(t::INK_SOFT));
+            ui.add_space(8.0);
+            let modes = [CM::Automatic, CM::Balanced, CM::Maximum, CM::Fast];
+            let labels: Vec<&str> = modes.iter().map(|m| m.label()).collect();
+            let current = modes.iter().position(|m| *m == self.compression).unwrap_or(0);
+            if let Some(i) = w::segmented(ui, "compression", &labels, current) {
+                self.compression = modes[i];
             }
         });
-        ui.label(
-            egui::RichText::new(format!("Selected: {}", self.compression.label()))
-                .size(t::MICRO)
-                .color(t::MINT),
-        );
 
         ui.add_space(6.0);
         let mut creator = self.creator_mode;
         ui.horizontal(|ui| {
-            w::protection_switch(ui, "sw_creator", &mut creator, false);
+            w::switch(ui, "sw_creator", &mut creator, false);
             ui.add_space(8.0);
             ui.vertical(|ui| {
-                ui.label(egui::RichText::new("Creator mode").size(t::SMALL).color(t::TEXT));
+                ui.label(egui::RichText::new("Creator mode").size(t::SMALL).color(t::INK));
                 ui.label(
                     egui::RichText::new(
                         "Diagnostics about this build only. It grants no authority, skips no check, \
                          and weakens no capsule.",
                     )
                     .size(t::MICRO)
-                    .color(t::MUTED),
+                    .color(t::INK_MUTED),
                 );
             });
         });
@@ -1641,14 +1636,41 @@ impl App {
             } else {
                 "Choose at least one build target."
             };
-            ui.label(egui::RichText::new(missing).size(t::SMALL).color(t::MUTED));
+            ui.label(egui::RichText::new(missing).size(t::SMALL).color(t::INK_MUTED));
         }
 
+        ui.add_space(16.0);
+
+        // Progress and the current stage, immediately above the log they
+        // describe. The bar's sheen keeps moving during a long stage, so it
+        // never looks frozen when the percentage stalls.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(if self.building {
+                    "Working"
+                } else if self.build_progress >= 1.0 {
+                    "Complete"
+                } else {
+                    "Ready"
+                })
+                .size(t::SMALL)
+                .color(if self.building { t::SKY_DEEP } else { t::INK_SOFT }),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{:.0}%", self.build_progress * 100.0))
+                        .size(t::SMALL)
+                        .color(t::INK_MUTED),
+                );
+            });
+        });
+        ui.add_space(6.0);
+        w::progress_bar(ui, ui.available_width(), self.build_progress, self.building, now);
         ui.add_space(14.0);
+
         let log_h = 150.0_f32.min(ui.available_height().max(90.0));
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), log_h), Sense::hover());
-        ui.painter()
-            .rect(rect, t::card_rounding(), t::alpha(t::VOID, 0.8), t::hairline());
+        ui.painter().rect(rect, t::card_rounding(), t::SUNKEN, t::hairline());
         let mut y = rect.bottom() - 20.0;
         for (ts, line) in self.log.iter().rev() {
             if y < rect.top() + 10.0 {
@@ -1656,12 +1678,21 @@ impl App {
             }
             let age = (now - ts) as f32;
             let fade = (1.0 - (age / 60.0)).clamp(0.4, 1.0);
+            // Colour by kind: attention for warnings, refusal for failures.
+            let lower = line.to_ascii_lowercase();
+            let col = if lower.contains("warning") || lower.contains("could not") {
+                t::AMBER
+            } else if lower.contains("failed") || lower.contains("refused") {
+                t::ROSE
+            } else {
+                t::INK_SOFT
+            };
             ui.painter().text(
                 pos2(rect.left() + 14.0, y),
                 Align2::LEFT_CENTER,
                 line,
                 t::mono(t::SMALL),
-                t::alpha(t::TEXT_DIM, fade),
+                t::alpha(col, fade),
             );
             y -= 19.0;
         }
@@ -1683,8 +1714,8 @@ impl App {
 
         ui.add_space(14.0);
         let mut want_out = false;
-        w::glass_card(ui, "outdir", 96.0, t::CYAN, false, false, |ui, _r, _l| {
-            ui.label(egui::RichText::new("EXTRACT TO").size(t::MICRO).color(t::MUTED));
+        w::card(ui, "outdir", 96.0, t::SKY, false, false, |ui, _r, _l| {
+            ui.label(egui::RichText::new("EXTRACT TO").size(t::MICRO).color(t::INK_MUTED));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 110.0;
@@ -1717,13 +1748,13 @@ impl App {
                         self.run_ok = true;
                         self.run_status = format!("Running as an independent process (pid {pid}).");
                         self.say(now, format!("Launched capsule, pid {pid}."));
-                        self.toast(now, "Capsule launched", t::MINT);
+                        self.toast(now, "Capsule launched", t::EMERALD);
                     }
                     Err(e) => {
                         self.run_ok = false;
                         self.run_status = format!("Could not start it: {e}");
                         self.say(now, format!("Launch failed: {e}"));
-                        self.toast(now, "Launch failed", t::CORAL);
+                        self.toast(now, "Launch failed", t::ROSE);
                     }
                 }
             }
@@ -1734,21 +1765,17 @@ impl App {
             ui.label(
                 egui::RichText::new(&self.run_status)
                     .size(t::SMALL)
-                    .color(if self.run_ok { t::MINT } else { t::CORAL }),
+                    .color(if self.run_ok { t::EMERALD } else { t::ROSE }),
             );
         }
 
         ui.add_space(10.0);
-        w::note(
-            ui,
-            "The capsule authorizes itself. This application grants it nothing and never sees its passphrase.",
-            t::MINT,
-        );
+        w::note(ui, "The capsule authorizes itself. This application grants it nothing and never sees its passphrase.", t::EMERALD, t::alpha(t::EMERALD, 0.08));
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(nyedarch_core::launch::terminal_hint())
                 .size(t::MICRO)
-                .color(t::MUTED),
+                .color(t::INK_MUTED),
         );
     }
 }
@@ -1765,19 +1792,15 @@ impl App {
             egui::Order::Background,
             egui::Id::new("eula_veil"),
         ));
-        painter.rect_filled(screen, Rounding::ZERO, t::VOID);
+        painter.rect_filled(screen, Rounding::ZERO, t::CANVAS);
+        // A soft sky bloom behind the licence panel, painted straight onto the
+        // background layer rather than through a throwaway Ui.
         w::glow(
-            &egui::Ui::new(
-                ctx.clone(),
-                egui::LayerId::new(egui::Order::Background, egui::Id::new("eula_glow")),
-                egui::Id::new("eula_glow_ui"),
-                screen,
-                screen,
-            ),
+            &painter,
             pos2(screen.center().x, screen.top() + screen.height() * 0.30),
             screen.width() * 0.45,
-            t::VIOLET_DEEP,
-            0.30,
+            t::SKY,
+            0.25,
         );
 
         egui::Area::new(egui::Id::new("eula_gate"))
@@ -1785,25 +1808,25 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_max_width(660.0);
                 egui::Frame::none()
-                    .fill(t::GLASS)
-                    .stroke(Stroke::new(1.0, t::alpha(t::CYAN, 0.35)))
+                    .fill(t::SURFACE)
+                    .stroke(Stroke::new(1.0, t::alpha(t::SKY, 0.35)))
                     .rounding(t::card_rounding())
                     .inner_margin(egui::Margin::symmetric(26.0, 22.0))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let (r, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
-                            w::aperture(ui, r.center(), 46.0, now, 0.0, false);
+                            w::aperture(ui.painter(), r.center(), 46.0, now, 0.0, false);
                             ui.add_space(6.0);
                             ui.vertical(|ui| {
                                 ui.label(
                                     egui::RichText::new("Before you use NYEDArch")
                                         .size(t::H_TITLE)
-                                        .color(t::TEXT),
+                                        .color(t::INK),
                                 );
                                 ui.label(
                                     egui::RichText::new("End User Licence Agreement")
                                         .size(t::SMALL)
-                                        .color(t::MUTED),
+                                        .color(t::INK_MUTED),
                                 );
                             });
                         });
@@ -1812,7 +1835,7 @@ impl App {
                         egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
                             for para in nyedarch_buildtool::eula::disclosures() {
                                 ui.label(
-                                    egui::RichText::new(para).size(t::SMALL).color(t::TEXT_DIM),
+                                    egui::RichText::new(para).size(t::SMALL).color(t::INK_SOFT),
                                 );
                                 ui.add_space(8.0);
                             }
@@ -1843,7 +1866,7 @@ impl App {
                         ui.label(
                             egui::RichText::new("Full text: docs/EULA.md")
                                 .size(t::MICRO)
-                                .color(t::MUTED),
+                                .color(t::INK_MUTED),
                         );
                     });
             });
@@ -1896,7 +1919,7 @@ impl App {
             egui::Order::Background,
             egui::Id::new("modal_veil"),
         ));
-        painter.rect_filled(screen, Rounding::ZERO, t::alpha(t::VOID, 0.72));
+        painter.rect_filled(screen, Rounding::ZERO, t::alpha(t::CANVAS, 0.72));
 
         let mut open = true;
         egui::Window::new(title)
@@ -1907,8 +1930,8 @@ impl App {
             .default_width(560.0)
             .frame(
                 egui::Frame::none()
-                    .fill(t::GLASS)
-                    .stroke(Stroke::new(1.0, t::alpha(t::CYAN, 0.35)))
+                    .fill(t::SURFACE)
+                    .stroke(Stroke::new(1.0, t::alpha(t::SKY, 0.35)))
                     .rounding(t::card_rounding())
                     .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
             )
@@ -1920,9 +1943,9 @@ impl App {
                     }
                     let mono = matches!(self.modal, Modal::Shortcuts);
                     let rt = if mono {
-                        egui::RichText::new(line).monospace().size(t::SMALL).color(t::TEXT_DIM)
+                        egui::RichText::new(line).monospace().size(t::SMALL).color(t::INK_SOFT)
                     } else {
-                        egui::RichText::new(line).size(t::SMALL).color(t::TEXT_DIM)
+                        egui::RichText::new(line).size(t::SMALL).color(t::INK_SOFT)
                     };
                     ui.label(rt);
                     ui.add_space(6.0);
@@ -1953,7 +1976,7 @@ impl App {
                 Ok(()) => {
                     self.run_status.clear();
                     self.run_ok = false;
-                    self.toast(now, "Capsule ready", t::MINT);
+                    self.toast(now, "Capsule ready", t::EMERALD);
                     self.say(now, format!("Loaded {}", path.display()));
                     self.dropped_capsule = Some(path);
                 }
@@ -1961,7 +1984,7 @@ impl App {
                     self.dropped_capsule = None;
                     self.run_ok = false;
                     self.run_status = format!("Cannot run that file: {e}");
-                    self.toast(now, "Not a capsule", t::CORAL);
+                    self.toast(now, "Not a capsule", t::ROSE);
                 }
             }
         }
@@ -2022,7 +2045,7 @@ impl App {
         painter.rect(
             rect,
             t::card_rounding(),
-            t::alpha(t::GLASS_HI, 0.97 * fade),
+            t::alpha(t::SUNKEN, 0.97 * fade),
             Stroke::new(1.0, t::alpha(colour, 0.85 * fade)),
         );
         painter.circle_filled(pos2(rect.left() + 20.0, rect.center().y), 5.0, t::alpha(colour, fade));
@@ -2031,7 +2054,7 @@ impl App {
             Align2::LEFT_CENTER,
             msg,
             t::font(t::SMALL),
-            t::alpha(t::TEXT, fade),
+            t::alpha(t::INK, fade),
         );
     }
 }
@@ -2042,8 +2065,7 @@ impl eframe::App for App {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
 
         let now = ctx.input(|i| i.time);
-        let pointer = ctx.pointer_latest_pos();
-        let hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
+                let hovering_file = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
         // Nothing else runs until the licence is accepted.
         if !self.eula_accepted {
@@ -2061,10 +2083,9 @@ impl eframe::App for App {
         self.rail(ctx, now);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(t::VOID))
+            .frame(egui::Frame::none().fill(t::CANVAS))
             .show(ctx, |ui| {
                 let full = ui.max_rect();
-                w::void_background(ui, full, now, pointer);
 
                 let since = (now - self.step_changed_at) as f32;
                 let e = t::ease_out_cubic((since / 0.30).clamp(0.0, 1.0));
@@ -2090,14 +2111,35 @@ impl eframe::App for App {
                 egui::Id::new("dropveil"),
             ));
             let r = ctx.screen_rect();
-            painter.rect_filled(r, Rounding::ZERO, t::alpha(t::VOID, 0.6));
+            painter.rect_filled(r, Rounding::ZERO, t::alpha(t::CANVAS, 0.6));
             painter.text(
                 r.center(),
                 Align2::CENTER_CENTER,
                 "Release to load the capsule",
                 t::font(t::H_TITLE),
-                t::CYAN,
+                t::SKY,
             );
+        }
+
+        // The application's pulse: a thin blacklight comet circling the window,
+        // slow while idle and visibly faster while a build runs. Drawn last so
+        // it sits above every panel, and never over the licence gate - which is
+        // the one screen where nothing should distract from a decision.
+        if self.eula_accepted {
+            let (speed, intensity) = if self.building {
+                (0.42, 1.0)
+            } else if self.build_progress >= 1.0 {
+                (0.10, 0.85)
+            } else {
+                (0.055, 0.78)
+            };
+            // Ease between speeds so a build starting or finishing accelerates
+            // smoothly rather than jumping.
+            let shown = ctx.animate_value_with_time(egui::Id::new("pulse_speed"), speed, 0.9);
+            let shown_i = ctx.animate_value_with_time(egui::Id::new("pulse_intensity"), intensity, 0.9);
+            self.pulse_phase += (now - self.pulse_last) * shown as f64;
+            self.pulse_last = now;
+            w::perimeter_pulse_at(ctx, self.pulse_phase, shown_i);
         }
 
         self.draw_modal(ctx);
