@@ -43,6 +43,9 @@ Two implementation details that matter:
 
 - The phase is **integrated**, not derived from the clock. Changing speed changes
   the *rate*; it never teleports the comet to a new position.
+- It is inset by **half the widest stroke** so it sits *on* the window edge with
+  no gap and nothing clipped. Insetting further left a visible margin between
+  the light and the frame, which broke the illusion that the window is glowing.
 - The head is the **deepest** violet and the tail fades lighter — the opposite of
   what reads well on a dark background, where a pale head glows. On white, a pale
   head simply disappears.
@@ -60,6 +63,34 @@ rather than by adding a warning icon and a paragraph:
 
 An unselected card stays plain white, so the interface is calm until something
 actually warrants attention.
+
+## Controls are drawn, not themed
+
+Recolouring a stock control leaves it looking stock. Text fields, sliders and
+the segmented control are painted by this crate:
+
+| Control | Before | Now |
+|---|---|---|
+| Text field | Grey box, hard outline that changed colour on hover | Soft inset that lifts to white on focus, with a sky ring that fades in |
+| Slider | Default track and square grip | Thin track, sky fill, soft round knob that grows slightly under the cursor |
+| Compression | Four outline buttons plus a caption saying which was active | Segmented control with a pill that glides |
+
+## Hover behaves like a surface, not a box
+
+The stock hover state draws a **border** around whatever the cursor is over,
+which reads as a box snapping into existence. Every interactive surface now
+tints instead — no outline appears on hover anywhere, and `expansion` is zero so
+nothing grows or jitters. Pressed goes one shade deeper.
+
+This required setting `weak_bg_fill` as well as `bg_fill`: the first is what a
+plain button paints, and setting only the second left toolbar and menu entries
+looking like filled boxes with outlines.
+
+## The toolbar is part of the window, not a strip on top of it
+
+It is 30 px, shares the rail's surface colour, and has **no rule beneath it**. A
+hairline there cut the window in two and left a visible seam; without it the top
+of the window reads as one continuous plane with the content floating on it.
 
 ## Accessibility notes
 

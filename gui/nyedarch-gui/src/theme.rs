@@ -165,7 +165,7 @@ pub fn apply(ctx: &egui::Context) {
     v.dark_mode = false;
     v.panel_fill = CANVAS;
     v.window_fill = SURFACE;
-    v.extreme_bg_color = SUNKEN;
+    v.extreme_bg_color = Color32::from_rgb(0xFA, 0xFC, 0xFE);
     v.faint_bg_color = SKY_WASH;
     v.override_text_color = Some(INK);
     v.window_rounding = card_rounding();
@@ -177,33 +177,57 @@ pub fn apply(ctx: &egui::Context) {
     v.selection.stroke = Stroke::new(1.0, SKY_DEEP);
     v.hyperlink_color = SKY_DEEP;
 
-    // Controls are flat and quiet; emphasis is carried by our own painting.
+    // Controls are flat until touched.
+    //
+    // `weak_bg_fill` is what a plain button paints; `bg_fill` is for things
+    // like text fields. Setting only `bg_fill` left menu entries and toolbar
+    // items looking like filled boxes with outlines, which is the "old design"
+    // heaviness: an outline appearing on hover reads as a box being drawn
+    // around the cursor rather than the surface responding to it.
+    let ctrl = Rounding::same(R_CONTROL);
+
+    v.widgets.noninteractive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.noninteractive.bg_fill = SURFACE;
     v.widgets.noninteractive.bg_stroke = hairline();
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, INK_SOFT);
-    v.widgets.noninteractive.rounding = Rounding::same(R_CONTROL);
+    v.widgets.noninteractive.rounding = ctrl;
 
+    // No fill and no outline at rest: a toolbar of outlined boxes is noise.
+    v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_fill = SUNKEN;
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, INK);
-    v.widgets.inactive.rounding = Rounding::same(R_CONTROL);
+    v.widgets.inactive.bg_stroke = Stroke::NONE;
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, INK_SOFT);
+    v.widgets.inactive.rounding = ctrl;
 
+    // Hover is a soft tint only. No border, so nothing appears to "snap" into
+    // existence under the cursor.
+    v.widgets.hovered.weak_bg_fill = SKY_WASH;
     v.widgets.hovered.bg_fill = SKY_WASH;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, alpha(SKY, 0.55));
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, INK);
-    v.widgets.hovered.rounding = Rounding::same(R_CONTROL);
+    v.widgets.hovered.bg_stroke = Stroke::NONE;
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, SKY_DEEP);
+    v.widgets.hovered.rounding = ctrl;
+    v.widgets.hovered.expansion = 0.0;
 
-    v.widgets.active.bg_fill = alpha(SKY, 0.16);
-    v.widgets.active.bg_stroke = Stroke::new(1.0, SKY);
-    v.widgets.active.fg_stroke = Stroke::new(1.0, INK);
-    v.widgets.active.rounding = Rounding::same(R_CONTROL);
+    // Pressed goes one shade deeper, still without an outline.
+    v.widgets.active.weak_bg_fill = alpha(SKY, 0.18);
+    v.widgets.active.bg_fill = alpha(SKY, 0.18);
+    v.widgets.active.bg_stroke = Stroke::NONE;
+    v.widgets.active.fg_stroke = Stroke::new(1.0, SKY_DEEP);
+    v.widgets.active.rounding = ctrl;
+    v.widgets.active.expansion = 0.0;
 
+    // An open menu keeps the hover tint so the trigger stays visibly related to
+    // the panel it opened.
+    v.widgets.open.weak_bg_fill = SKY_WASH;
     v.widgets.open.bg_fill = SKY_WASH;
-    v.widgets.open.bg_stroke = Stroke::new(1.0, alpha(SKY, 0.6));
+    v.widgets.open.bg_stroke = Stroke::NONE;
+    v.widgets.open.rounding = ctrl;
 
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(14.0, 8.0);
-    style.spacing.menu_margin = egui::Margin::symmetric(6.0, 6.0);
+    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+    style.spacing.button_padding = egui::vec2(12.0, 6.0);
+    style.spacing.menu_margin = egui::Margin::symmetric(8.0, 8.0);
+    style.spacing.text_edit_width = 240.0;
+    style.spacing.interact_size.y = 26.0;
     style.spacing.indent = 18.0;
 
     ctx.set_style(style);

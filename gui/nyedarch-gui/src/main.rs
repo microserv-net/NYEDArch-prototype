@@ -696,19 +696,19 @@ impl App {
 impl App {
     fn menu_bar(&mut self, ctx: &egui::Context, now: f64) {
         egui::TopBottomPanel::top("menubar")
-            .exact_height(34.0)
+            .exact_height(30.0)
             .frame(
                 egui::Frame::none()
                     .fill(t::RAIL)
-                    .inner_margin(egui::Margin::symmetric(8.0, 4.0)),
+                    .inner_margin(egui::Margin::symmetric(6.0, 2.0)),
             )
             .show(ctx, |ui| {
-                // Hairline under the bar keeps it visually attached to the rail.
-                let r = ui.max_rect();
-                ui.painter().line_segment(
-                    [pos2(r.left(), r.bottom()), pos2(r.right(), r.bottom())],
-                    Stroke::new(1.0, t::LINE),
-                );
+                // No rule under the bar.
+                //
+                // A hairline there cuts the window in two and leaves a visible
+                // seam between the toolbar and the body. The bar shares the
+                // rail's surface colour instead, so the top of the window reads
+                // as one continuous plane and the content below floats on it.
 
                 egui::menu::bar(ui, |ui| {
                     // Capsule: the object this application exists to make.
@@ -940,12 +940,7 @@ impl App {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     let w = ui.available_width() - 210.0;
-                    ui.add_sized(
-                        vec2(w.max(120.0), 32.0),
-                        egui::TextEdit::singleline(&mut self.source_path)
-                            .hint_text("choose a folder or file")
-                            .margin(vec2(10.0, 7.0)),
-                    );
+                    w::field(ui, "src_path", &mut self.source_path, "choose a folder or file", w.max(120.0), false);
                     if w::ghost_button(ui, "pickdir", "Folder...", 96.0).clicked() {
                         want_folder = true;
                     }
@@ -1046,13 +1041,8 @@ impl App {
             });
             w::pill(ui.painter(), pos2(rect.left() + 132.0, rect.top() + 14.0), "always on", t::EMERALD, t::alpha(t::EMERALD, 0.12));
             ui.add_space(8.0);
-            ui.add_sized(
-                vec2(ui.available_width(), 32.0),
-                egui::TextEdit::singleline(&mut self.passphrase)
-                    .password(true)
-                    .hint_text("choose a strong passphrase")
-                    .margin(vec2(10.0, 7.0)),
-            );
+            let w = ui.available_width();
+            w::field(ui, "passphrase", &mut self.passphrase, "choose a strong passphrase", w, true);
         });
 
         ui.add_space(16.0);
@@ -1079,11 +1069,8 @@ impl App {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Within").size(t::SMALL).color(t::INK_SOFT));
-                    ui.add(
-                        egui::Slider::new(&mut self.protections.location_tolerance_m, 25..=1000)
-                            .suffix(" m")
-                            .trailing_fill(true),
-                    );
+                    let w = (ui.available_width() - 20.0).min(320.0);
+                    w::slider(ui, "loc_tol", &mut self.protections.location_tolerance_m, 25..=1000, w, " m");
                 });
                 ui.label(
                     egui::RichText::new("A reading less accurate than this is refused, not accepted.")
@@ -1115,18 +1102,10 @@ impl App {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("At").size(t::SMALL).color(t::INK_SOFT));
-                    ui.add_sized(
-                        vec2(74.0, 28.0),
-                        egui::TextEdit::singleline(&mut self.protections.time_of_day)
-                            .margin(vec2(8.0, 5.0)),
-                    );
+                    w::field(ui, "time_of_day", &mut self.protections.time_of_day, "HH:MM", 84.0, false);
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("give or take").size(t::SMALL).color(t::INK_SOFT));
-                    ui.add(
-                        egui::DragValue::new(&mut self.protections.time_tolerance_min)
-                            .clamp_range(1..=180)
-                            .suffix(" min"),
-                    );
+                    w::slider(ui, "time_tol", &mut self.protections.time_tolerance_min, 1..=180, 190.0, " min");
                 });
                 ui.label(
                     egui::RichText::new("Recurring, not an expiry: this repeats every day.")
@@ -1175,12 +1154,8 @@ impl App {
         w::card(ui, "msearch", 118.0, t::SKY, false, false, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Search").size(t::SMALL).color(t::INK_SOFT));
-                ui.add_sized(
-                    vec2(ui.available_width() - 190.0, 28.0),
-                    egui::TextEdit::singleline(&mut self.machine_query)
-                        .hint_text("id or label")
-                        .margin(vec2(8.0, 5.0)),
-                );
+                let w = ui.available_width() - 190.0;
+                w::field(ui, "msearch", &mut self.machine_query, "id or label", w, false);
                 ui.add_space(8.0);
                 let label = if self.tag_mode_all { "ALL tags" } else { "ANY tag" };
                 if w::ghost_button(ui, "tagmode", label, 108.0).clicked() {
@@ -1412,29 +1387,16 @@ impl App {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Owner").size(t::SMALL).color(t::INK_SOFT));
-                    ui.add_sized(
-                        vec2(150.0, 28.0),
-                        egui::TextEdit::singleline(&mut self.gh_owner)
-                            .hint_text("github user or org")
-                            .margin(vec2(8.0, 5.0)),
-                    );
+                    w::field(ui, "gh_owner", &mut self.gh_owner, "github user or org", 160.0, false);
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::INK_SOFT));
-                    ui.add_sized(
-                        vec2(170.0, 28.0),
-                        egui::TextEdit::singleline(&mut self.gh_repo).margin(vec2(8.0, 5.0)),
-                    );
+                    w::field(ui, "gh_repo", &mut self.gh_repo, "repository", 180.0, false);
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT));
-                    ui.add_sized(
-                        vec2(ui.available_width() - 10.0, 28.0),
-                        egui::TextEdit::singleline(&mut self.gh_token)
-                            .password(true)
-                            .hint_text("personal access token with repo scope")
-                            .margin(vec2(8.0, 5.0)),
-                    );
+                    let w = ui.available_width() - 10.0;
+                    w::field(ui, "gh_token", &mut self.gh_token, "personal access token with repo scope", w, true);
                 });
                 ui.add_space(4.0);
                 ui.label(
@@ -1719,12 +1681,7 @@ impl App {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 let w = ui.available_width() - 110.0;
-                ui.add_sized(
-                    vec2(w.max(120.0), 32.0),
-                    egui::TextEdit::singleline(&mut self.run_out_dir)
-                        .hint_text("leave empty for the capsule's default")
-                        .margin(vec2(10.0, 7.0)),
-                );
+                w::field(ui, "outdir", &mut self.run_out_dir, "leave empty for the capsule's default", w.max(120.0), false);
                 if w::ghost_button(ui, "pickout", "Choose...", 100.0).clicked() {
                     want_out = true;
                 }

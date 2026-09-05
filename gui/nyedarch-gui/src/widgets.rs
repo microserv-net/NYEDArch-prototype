@@ -108,7 +108,11 @@ pub fn perimeter_pulse_at(ctx: &egui::Context, phase: f64, intensity: f32) {
         egui::Order::Foreground,
         egui::Id::new("perimeter_pulse"),
     ));
-    let r = ctx.screen_rect().shrink(3.5);
+    // Half the widest stroke, so the comet sits *on* the window edge with no
+    // gap, and still nothing is clipped. Insetting further left a visible
+    // margin between the light and the frame, which broke the illusion that
+    // the window itself is glowing.
+    let r = ctx.screen_rect().shrink(1.25);
     if r.width() < 40.0 || r.height() < 40.0 {
         return;
     }
@@ -141,15 +145,21 @@ pub fn perimeter_pulse_at(ctx: &egui::Context, phase: f64, intensity: f32) {
         let col = t::mix(t::VIOLET_BRIGHT, t::VIOLET, k);
         painter.line_segment(
             [a, b],
-            Stroke::new(1.2 + 2.2 * k, t::alpha(col, (0.06 + 0.94 * k) * intensity)),
+            Stroke::new(0.9 + 1.6 * k, t::alpha(col, (0.06 + 0.94 * k) * intensity)),
         );
     }
 
     // A small bloom at the head sells it as light rather than a drawn line.
     let hp = perimeter_point(r, head);
-    glow(&painter, hp, 14.0 + 10.0 * intensity, t::VIOLET, 0.75 * intensity);
-    painter.circle_filled(hp, 2.0, t::alpha(t::VIOLET, intensity));
-    painter.circle_filled(hp, 0.9, t::alpha(Color32::WHITE, 0.75 * intensity));
+    // The bloom is drawn inward from the edge so it does not simply vanish
+    // against the window frame.
+    let inward = {
+        let c = r.center();
+        let d = (c - hp).normalized();
+        hp + d * 3.0
+    };
+    glow(&painter, inward, 13.0 + 9.0 * intensity, t::VIOLET, 0.7 * intensity);
+    painter.circle_filled(hp, 1.5, t::alpha(t::VIOLET, intensity));
 }
 
 // -------------------------------------------------------------- progress ----
@@ -796,4 +806,109 @@ pub fn segmented(ui: &mut Ui, id_salt: &str, options: &[&str], selected: usize) 
         );
     }
     clicked
+}
+
+/// A text field drawn to match the rest of the interface.
+///
+/// The stock control is a grey box with a hard outline that changes colour on
+/// hover — the single most dated-looking thing in the window. This is a soft
+/// inset that lifts to white on focus and grows a sky ring, so focus arrives
+/// rather than snapping.
+pub fn field(
+    ui: &mut Ui,
+    id_salt: &str,
+    text: &mut String,
+    hint: &str,
+    width: f32,
+    password: bool,
+) -> Response {
+    let height = 34.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    let id = ui.id().with(id_salt);
+
+    // Chrome first, editor second: the editor draws on top of a surface that
+    // is already there, so there is no flicker and no layer juggling.
+    let focus = ui.ctx().animate_bool_with_time(id.with("f"), false, 0.0);
+    let prev_focus = ui.memory(|m| m.has_focus(id.with("edit")));
+    let focus = ui
+        .ctx()
+        .animate_bool_with_time(id.with("f"), prev_focus, 0.14)
+        .max(focus * 0.0);
+    let hovered = ui.rect_contains_pointer(rect);
+    let hov = ui
+        .ctx()
+        .animate_bool_with_time(id.with("h"), hovered && !prev_focus, 0.12);
+
+    let round = Rounding::same(t::R_CONTROL);
+    let bg = t::mix(
+        t::mix(Color32::from_rgb(0xFA, 0xFC, 0xFE), t::SURFACE, focus),
+        t::SKY_WASH,
+        hov * 0.5,
+    );
+    ui.painter().rect_filled(rect, round, bg);
+    ui.painter().rect_stroke(
+        rect,
+        round,
+        Stroke::new(1.0, t::mix(t::LINE, t::alpha(t::SKY, 0.9), focus.max(hov * 0.4))),
+    );
+    if focus > 0.01 {
+        // A soft ring, so focus arrives rather than snapping.
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            Rounding::same(t::R_CONTROL + 2.0),
+            Stroke::new(2.0, t::alpha(t::SKY, 0.20 * focus)),
+        );
+    }
+
+    let edit_rect = rect.shrink2(vec2(12.0, 0.0));
+    let mut child = ui.child_ui(edit_rect, egui::Layout::left_to_right(egui::Align::Center));
+    child.add(
+        egui::TextEdit::singleline(text)
+            .id(id.with("edit"))
+            .desired_width(edit_rect.width())
+            .hint_text(hint)
+            .password(password)
+            .frame(false)
+            .vertical_align(egui::Align::Center),
+    )
+}
+
+/// A slider drawn to match: a thin track, a soft knob, and a sky fill.
+pub fn slider(ui: &mut Ui, id_salt: &str, value: &mut u32, range: std::ops::RangeInclusive<u32>, width: f32, suffix: &str) -> Response {
+    let height = 26.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
+    let id = ui.id().with(id_salt);
+
+    let lo = *range.start() as f32;
+    let hi = *range.end() as f32;
+    let track = Rect::from_center_size(rect.center(), vec2(rect.width() - 56.0, 5.0));
+
+    if resp.dragged() || resp.clicked() {
+        if let Some(p) = resp.interact_pointer_pos() {
+            let f = ((p.x - track.left()) / track.width()).clamp(0.0, 1.0);
+            *value = (lo + f * (hi - lo)).round() as u32;
+        }
+    }
+    let f = ((*value as f32 - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0);
+
+    let r = Rounding::same(track.height() / 2.0);
+    ui.painter().rect_filled(track, r, t::SUNKEN);
+    let fill = Rect::from_min_size(track.min, vec2(track.width() * f, track.height()));
+    ui.painter().rect_filled(fill, r, t::SKY);
+
+    let knob = pos2(track.left() + track.width() * f, track.center().y);
+    let hov = ui.ctx().animate_bool_with_time(id, resp.hovered() || resp.dragged(), 0.12);
+    ui.painter().circle_filled(knob + vec2(0.0, 1.0), 8.0, t::alpha(Color32::BLACK, 0.10));
+    ui.painter().circle_filled(knob, 7.0 + hov, Color32::WHITE);
+    ui.painter()
+        .circle_stroke(knob, 7.0 + hov, Stroke::new(1.5, t::mix(t::SKY, t::SKY_DEEP, hov)));
+
+    ui.painter().text(
+        pos2(rect.right(), rect.center().y),
+        Align2::RIGHT_CENTER,
+        format!("{value}{suffix}"),
+        t::font(t::SMALL),
+        t::INK_SOFT,
+    );
+    resp
 }
