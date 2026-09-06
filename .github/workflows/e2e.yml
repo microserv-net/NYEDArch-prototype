@@ -143,28 +143,36 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-      # Also commit the log back to the branch.
+      # Post the log as a commit comment.
       #
-      # An uploaded artifact is only readable by someone who can reach GitHub's
-      # storage host, and some networks cannot. A file in the branch is readable
-      # through the contents API, which is the difference between diagnosing a
-      # failure and guessing at it.
-      - name: Commit the log to the branch
+      # An uploaded artifact needs GitHub's storage host, which some networks
+      # block, and pushing a file back needs a writable checkout - which after
+      # actions/checkout is a detached HEAD, so the step reported success while
+      # committing to nowhere. A comment is a plain API write and is readable
+      # wherever the API is.
+      - name: Report the failure where it can be read
         if: failure() && steps.token.outputs.have == 'true'
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p e2e-results
-          cp /tmp/remote.log e2e-results/last-run.log 2>/dev/null || true
-          git config user.name  "nyedarch-ci"
-          git config user.email "ci@nyedarch.invalid"
-          git add e2e-results/last-run.log || true
-          git commit -m "e2e: log from the failing run [skip ci]" || exit 0
-          # actions/checkout leaves a detached HEAD, so a bare `git push` has
-          # no upstream and quietly does nothing - the step reported success
-          # while committing to nowhere. Push explicitly to the branch.
-          BRANCH="${{ github.head_ref || github.ref_name }}"
-          for i in 1 2 3; do
-            git fetch origin "$BRANCH" && git rebase "origin/$BRANCH" || true
-            git push origin "HEAD:$BRANCH" && break
-            sleep $((RANDOM % 6 + 2))
-          done
+          BODY=$(printf '### e2e failure\n\n```\n%s\n```\n' "$(tail -60 /tmp/remote.log 2>/dev/null || echo 'no log')")
+          python3 - "$BODY" <<'EOF'
+          import json, os, sys, urllib.request
+          body = sys.argv[1]
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/commits/{os.environ['GITHUB_SHA']}/comments",
+              data=json.dumps({"body": body}).encode(),
+              headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "nyedarch-ci",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req) as r:
+                  print("comment posted:", r.status)
+          except Exception as e:
+              print("could not post comment:", e)
+          EOF
