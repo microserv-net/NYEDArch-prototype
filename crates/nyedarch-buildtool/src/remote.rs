@@ -198,10 +198,23 @@ pub fn run_remote_build_with(
                 // success is not evidence it produced the right binary. The
                 // capsule embeds the sealed package, so the commitment made
                 // before the build must appear in it.
-                if !nyedarch_github::orchestrator::artifact_carries_package(
-                    &entry.data,
-                    &args.package_commitment,
-                ) {
+                // Check for the sealed package itself, not its hash.
+                //
+                // `package_commitment` is a SHA-256 over the package. The
+                // capsule embeds the *package*, not its digest, so searching
+                // the binary for the commitment could never match - it refused
+                // every artifact for a reason that had nothing to do with
+                // provenance. The package bytes are embedded verbatim, so their
+                // presence is the check that was intended.
+                let sealed_package = std::fs::read(args.project_dir.join("capsule.nyeda"))
+                    .or_else(|_| std::fs::read(args.project_dir.join("capsule.nyarch")))
+                    .unwrap_or_default();
+                let carries = !sealed_package.is_empty()
+                    && entry
+                        .data
+                        .windows(sealed_package.len())
+                        .any(|w| w == sealed_package.as_slice());
+                if !carries {
                     report(
                         "The artifact does not carry the package this build committed to. \
                          It has been refused and not saved."

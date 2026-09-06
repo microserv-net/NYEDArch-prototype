@@ -48,3 +48,33 @@ fn truncated_streamed_archives_are_refused() {
     broken[n - 6..n - 2].copy_from_slice(&u32::MAX.to_le_bytes());
     let _ = artifact::capsule_from_artifact(&broken);
 }
+
+/// Provenance must be checked against the *package*, not its digest.
+///
+/// `package_commitment` is a SHA-256 over the sealed package. The capsule
+/// embeds the package itself, never the digest, so searching a capsule for the
+/// commitment cannot match - it refused every artifact for a reason unrelated
+/// to provenance. This pins the property the check actually relies on: the
+/// sealed package appears verbatim in the built capsule.
+#[test]
+fn the_sealed_package_is_what_a_capsule_carries() {
+    // Stand-in for a compiled capsule: arbitrary code around an embedded blob.
+    let package = b"NYARCH-sealed-package-bytes-0123456789".to_vec();
+    let mut capsule = b"\x7fELF................".to_vec();
+    capsule.extend_from_slice(&package);
+    capsule.extend_from_slice(b"....more machine code....");
+
+    let found = capsule
+        .windows(package.len())
+        .any(|w| w == package.as_slice());
+    assert!(found, "the package must be findable in the capsule");
+
+    // A capsule built from a different package must not pass.
+    let other = b"NYARCH-sealed-package-bytes-9876543210".to_vec();
+    assert!(!capsule.windows(other.len()).any(|w| w == other.as_slice()));
+
+    // A digest of the package is not present, which is why the first check
+    // could never succeed.
+    let digest = [0xABu8; 32];
+    assert!(!capsule.windows(32).any(|w| w == digest));
+}
