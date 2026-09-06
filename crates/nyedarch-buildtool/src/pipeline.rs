@@ -502,3 +502,46 @@ pub fn runtime_source_root() -> PathBuf {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("crates"))
 }
+
+/// Compile a generated capsule project on this machine.
+///
+/// The remote build is how a capsule is produced for *other* platforms, and it
+/// stays the default. But when it cannot deliver - no network, a failed run, a
+/// timeout - the client used to hand the user a directory and tell them to run
+/// `stage-capsule.sh` themselves. That is the client's job: it has the project,
+/// it knows where the capsule goes, and asking someone to run a shell script to
+/// finish a build they already started is not a product.
+///
+/// Returns the path of the compiled capsule inside the project.
+pub fn build_locally(
+    project_dir: &std::path::Path,
+    mut on_line: impl FnMut(String),
+) -> Result<std::path::PathBuf, String> {
+    on_line("Building the capsule on this machine.".to_string());
+    on_line("This compiles the capsule's own source, so it takes a minute.".to_string());
+
+    let out = std::process::Command::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(project_dir)
+        .env("CARGO_INCREMENTAL", "0")
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}. Is the Rust toolchain installed?"))?;
+
+    if !out.status.success() {
+        // The compiler's own words are far more useful than "build failed".
+        let err = String::from_utf8_lossy(&out.stderr);
+        for line in err.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+            on_line(line.to_string());
+        }
+        return Err("the capsule did not compile on this machine".to_string());
+    }
+
+    let mut candidate = project_dir.join("target/release/nyedarch-capsule");
+    if !candidate.exists() {
+        candidate = project_dir.join("target/release/nyedarch-capsule.exe");
+    }
+    if !candidate.exists() {
+        return Err("the build reported success but produced no capsule".to_string());
+    }
+    Ok(candidate)
+}

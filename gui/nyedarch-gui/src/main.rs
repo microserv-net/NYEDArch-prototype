@@ -717,18 +717,50 @@ impl App {
                         )));
                         let _ = tx.send(BuildMsg::Note("Working files removed.".to_string()));
                     } else {
+                        // The remote build did not deliver. Finish the job here
+                        // rather than handing over a directory and instructions.
                         let _ = tx.send(BuildMsg::Note(
-                            "No capsule was delivered, so the working files have been kept."
-                                .to_string(),
+                            "The remote build did not return a capsule.".to_string(),
                         ));
-                        let _ = tx.send(BuildMsg::Note(format!(
-                            "They are at {}",
-                            o.project_dir.display()
-                        )));
-                        let _ = tx.send(BuildMsg::Note(
-                            "Run stage-capsule.sh there to build the capsule on this machine."
-                                .to_string(),
-                        ));
+                        let tx4 = tx.clone();
+                        match nyedarch_buildtool::pipeline::build_locally(&o.project_dir, move |l| {
+                            let _ = tx4.send(BuildMsg::Note(l));
+                        }) {
+                            Ok(built) => match std::fs::copy(&built, &deliver_check) {
+                                Ok(_) => {
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = std::fs::set_permissions(
+                                            &deliver_check,
+                                            std::fs::Permissions::from_mode(0o755),
+                                        );
+                                    }
+                                    let _ = std::fs::remove_dir_all(&o.project_dir);
+                                    let _ = tx.send(BuildMsg::Note(format!(
+                                        "Capsule built here and saved to {}",
+                                        deliver_check.display()
+                                    )));
+                                    let _ = tx.send(BuildMsg::Note(
+                                        "Built for this platform only. Use the remote build for others."
+                                            .to_string(),
+                                    ));
+                                    let _ = tx.send(BuildMsg::Note("Working files removed.".into()));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(BuildMsg::Note(format!(
+                                        "The capsule was built but could not be saved: {e}"
+                                    )));
+                                }
+                            },
+                            Err(e) => {
+                                let _ = tx.send(BuildMsg::Note(format!("Local build failed: {e}")));
+                                let _ = tx.send(BuildMsg::Note(format!(
+                                    "The working files have been kept at {}",
+                                    o.project_dir.display()
+                                )));
+                            }
+                        }
                     }
                     let _ = tx.send(BuildMsg::Done {
                         project: o.project_dir,
@@ -767,7 +799,7 @@ impl App {
                     self.built_project = Some(project.clone());
                     self.build_rx = None;
                     self.say(now, format!("Sealed {bytes} bytes for {machines} machine(s), build {nonce:016x}."));
-                    self.say(now, "Working files removed.".to_string());
+
                     for d in std::mem::take(&mut self.pending_diagnostics) {
                         self.say(now, format!("  {d}"));
                     }
