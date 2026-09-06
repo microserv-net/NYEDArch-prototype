@@ -123,7 +123,14 @@ jobs:
           # It must be an executable for this platform, not another target's
           # binary - selecting the wrong artifact is a bug this catches.
           file "$CAP" | tee /tmp/file.txt
-          grep -qi "ELF" /tmp/file.txt
+          if ! grep -qi "ELF" /tmp/file.txt; then
+            echo "::error::the delivered capsule is not a binary for this platform"
+            echo "::error::file says: $(cat /tmp/file.txt)"
+            grep -o "saved to .*" /tmp/remote.log | tail -1 | while IFS= read -r l; do
+              echo "::error::log: $l"
+            done
+            exit 1
+          fi
 
           if ! "$CAP" /tmp/e2e-out; then
             echo "::error::the capsule refused to open with the correct passphrase"

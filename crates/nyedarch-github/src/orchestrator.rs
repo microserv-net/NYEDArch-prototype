@@ -371,9 +371,24 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
             .iter()
             .map(|t| t.rust_target().to_string())
             .collect::<Vec<_>>();
+        // Prefer the host's own platform.
+        //
+        // A build usually requests every target, and only one file can be
+        // delivered. Handing over whichever artifact GitHub listed first gave a
+        // Windows binary to someone on macOS - it downloads, it saves, and it
+        // cannot run. The capsule a user can actually open is the one for the
+        // machine they are sitting at.
+        let host = if cfg!(target_os = "windows") {
+            "x86_64-pc-windows-msvc"
+        } else if cfg!(target_os = "macos") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
         let chosen = all
             .iter()
-            .find(|(_, name)| wanted.iter().any(|w| name.contains(w.as_str())))
+            .find(|(_, name)| name.contains(host) && wanted.iter().any(|w| name.contains(w.as_str())))
+            .or_else(|| all.iter().find(|(_, name)| wanted.iter().any(|w| name.contains(w.as_str()))))
             .or_else(|| all.first())
             .map(|(id, name)| (*id, name.clone()));
 
@@ -585,6 +600,34 @@ mod artifact_tests {
         // client waits rather than adopting whatever it finds.
         let none = super::run_ids(b"{}");
         assert!(none.is_empty());
+    }
+
+    /// With every target requested, the host's own artifact must win.
+    ///
+    /// Only one file is delivered, and a capsule for another platform cannot be
+    /// opened by the person who asked for it.
+    #[test]
+    fn the_hosts_own_artifact_is_preferred() {
+        let listing = r#"{"artifacts":[
+          {"id":1,"name":"nyedarch-capsule-x86_64-pc-windows-msvc"},
+          {"id":2,"name":"nyedarch-capsule-aarch64-apple-darwin"},
+          {"id":3,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu"}]}"#;
+        let all = super::artifact_list(listing);
+        let host = if cfg!(target_os = "windows") {
+            "x86_64-pc-windows-msvc"
+        } else if cfg!(target_os = "macos") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        let chosen = all
+            .iter()
+            .find(|(_, n)| n.contains(host))
+            .expect("the host artifact is present in this listing");
+        assert!(
+            chosen.1.contains(host),
+            "selection must land on the host platform, not on listing order"
+        );
     }
 
     #[test]
