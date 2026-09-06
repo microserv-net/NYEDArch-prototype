@@ -110,7 +110,7 @@ pub fn dispatch_workflow(token: &str, owner: &str, repo: &str, workflow_file: &s
 }
 
 pub fn list_runs(token: &str, owner: &str, repo: &str) -> HttpRequest {
-    HttpRequest { method: Method::Get, url: format!("{API}/repos/{owner}/{repo}/actions/runs?per_page=5"), headers: auth_headers(token), body: Vec::new() }
+    HttpRequest { method: Method::Get, url: format!("{API}/repos/{owner}/{repo}/actions/runs?per_page=30"), headers: auth_headers(token), body: Vec::new() }
 }
 
 pub fn run_logs(token: &str, owner: &str, repo: &str, run_id: u64) -> HttpRequest {

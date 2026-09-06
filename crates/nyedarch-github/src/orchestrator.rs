@@ -277,12 +277,13 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         // run" attaches to the previous one - the client then waits on a build
         // that already finished, reports its result, and fetches its artifacts.
         // Observed live: the wait returned instantly and no artifact appeared.
-        let previous_newest = self
+        let known_runs: std::collections::BTreeSet<u64> = self
             .transport
             .send(&ep::list_runs(&cfg.token, &cfg.owner, &cfg.repo))
             .ok()
             .filter(|r| ok(r.status))
-            .and_then(|r| newest_run_id(&r.body));
+            .map(|r| run_ids(&r.body))
+            .unwrap_or_default();
 
         let r = self.transport.send(&ep::dispatch_workflow(
             &cfg.token, &cfg.owner, &cfg.repo, "nyeda.yml", &inputs.git_ref,
@@ -298,11 +299,10 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         for _ in 0..self.max_wait_polls {
             let runs = self.transport.send(&ep::list_runs(&cfg.token, &cfg.owner, &cfg.repo))?;
             if ok(runs.status) {
-                if let Some(newest) = newest_run_id(&runs.body) {
-                    if Some(newest) != previous_newest {
-                        run_id = Some(newest);
-                        break;
-                    }
+                // The first id that was not there before dispatch.
+                if let Some(fresh) = run_ids(&runs.body).into_iter().find(|id| !known_runs.contains(id)) {
+                    run_id = Some(fresh);
+                    break;
                 }
             }
             (self.sleep)(self.poll_interval_secs);
@@ -433,13 +433,31 @@ fn artifact_list(text: &str) -> Vec<(u64, String)> {
     out
 }
 
-/// The newest run id in a runs listing. GitHub returns them most-recent first.
-fn newest_run_id(body: &[u8]) -> Option<u64> {
+/// Every run id in a runs listing.
+///
+/// The client used to remember only the *newest* id and wait for a different
+/// one. That breaks in two ways, and both were observed: if the listing call
+/// fails there is nothing to compare against, and if the new run has not
+/// registered yet the newest id is still an old one. Either way the client
+/// adopted a run that had already finished, skipped the wait entirely, and went
+/// looking for artifacts that were expired or gone - exiting in seconds with no
+/// capsule.
+///
+/// Remembering the whole set removes the ambiguity: a run is new when its id was
+/// not there before, and "the listing failed" is an empty set, which matches
+/// nothing rather than everything.
+fn run_ids(body: &[u8]) -> std::collections::BTreeSet<u64> {
     let text = String::from_utf8_lossy(body);
-    let i = text.find("\"id\":")? + 5;
-    let rest = text[i..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit())?;
-    rest[..end].parse().ok()
+    let mut out = std::collections::BTreeSet::new();
+    let mut rest = &text[..];
+    while let Some(i) = rest.find("\"id\":") {
+        rest = &rest[i + 5..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(id) = digits.parse::<u64>() {
+            out.insert(id);
+        }
+    }
+    out
 }
 
 
@@ -544,6 +562,31 @@ mod artifact_tests {
     ///
     /// GitHub orders the listing; taking the first entry handed a Windows
     /// binary to someone building for macOS, which simply does not run.
+    /// A run is new when its id was not present before dispatch.
+    ///
+    /// Comparing against "the newest id" adopted an already-finished run
+    /// whenever the pre-dispatch listing failed or the new run had not
+    /// registered yet - the client then skipped the wait and looked for
+    /// artifacts that were long gone.
+    #[test]
+    fn only_a_genuinely_new_run_is_adopted() {
+        let before = super::run_ids(br#"{"workflow_runs":[{"id":300},{"id":200},{"id":100}]}"#);
+        assert_eq!(before.len(), 3);
+
+        // Nothing new yet: the client must keep waiting.
+        let same = super::run_ids(br#"{"workflow_runs":[{"id":300},{"id":200},{"id":100}]}"#);
+        assert!(same.into_iter().find(|id| !before.contains(id)).is_none());
+
+        // A new run appears.
+        let after = super::run_ids(br#"{"workflow_runs":[{"id":400},{"id":300},{"id":200}]}"#);
+        assert_eq!(after.into_iter().find(|id| !before.contains(id)), Some(400));
+
+        // A failed listing is an empty set, which matches nothing - so the
+        // client waits rather than adopting whatever it finds.
+        let none = super::run_ids(b"{}");
+        assert!(none.is_empty());
+    }
+
     #[test]
     fn artifacts_are_listed_with_their_names() {
         let listing = r#"{"total_count":3,"artifacts":[

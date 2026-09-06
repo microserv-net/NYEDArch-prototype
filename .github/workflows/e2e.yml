@@ -159,7 +159,12 @@ jobs:
           git config user.email "ci@nyedarch.invalid"
           git add e2e-results/last-run.log || true
           git commit -m "e2e: log from the failing run [skip ci]" || exit 0
+          # actions/checkout leaves a detached HEAD, so a bare `git push` has
+          # no upstream and quietly does nothing - the step reported success
+          # while committing to nowhere. Push explicitly to the branch.
+          BRANCH="${{ github.head_ref || github.ref_name }}"
           for i in 1 2 3; do
-            git pull --rebase --autostash && git push && break
+            git fetch origin "$BRANCH" && git rebase "origin/$BRANCH" || true
+            git push origin "HEAD:$BRANCH" && break
             sleep $((RANDOM % 6 + 2))
           done
