@@ -142,3 +142,24 @@ jobs:
           path: /tmp/remote.log
           if-no-files-found: warn
           retention-days: 3
+
+      # Also commit the log back to the branch.
+      #
+      # An uploaded artifact is only readable by someone who can reach GitHub's
+      # storage host, and some networks cannot. A file in the branch is readable
+      # through the contents API, which is the difference between diagnosing a
+      # failure and guessing at it.
+      - name: Commit the log to the branch
+        if: failure() && steps.token.outputs.have == 'true' && github.event_name != 'pull_request'
+        continue-on-error: true
+        run: |
+          mkdir -p e2e-results
+          cp /tmp/remote.log e2e-results/last-run.log 2>/dev/null || true
+          git config user.name  "nyedarch-ci"
+          git config user.email "ci@nyedarch.invalid"
+          git add e2e-results/last-run.log || true
+          git commit -m "e2e: log from the failing run [skip ci]" || exit 0
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && break
+            sleep $((RANDOM % 6 + 2))
+          done
