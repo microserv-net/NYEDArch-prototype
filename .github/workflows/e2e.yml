@@ -90,8 +90,12 @@ jobs:
             # one this is developed on. Annotations come back from the checks
             # API, so the reason a build failed is readable everywhere.
             echo "::error::the remote build did not deliver a capsule"
-            tail -25 /tmp/remote.log | while IFS= read -r line; do
-              echo "::error::remote: ${line}"
+            # Only the last few lines: GitHub caps how many annotations it
+            # keeps, and a wide tail meant the cap fell on the *earliest* of
+            # them - showing the middle of the run and hiding the ending, which
+            # is the part that says why it stopped.
+            tail -6 /tmp/remote.log | while IFS= read -r line; do
+              echo "::error::end: ${line}"
             done
             exit 1
           fi
