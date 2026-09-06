@@ -49,11 +49,11 @@ impl Stage {
     }
     pub fn message(&self) -> &'static str {
         match self {
-            Stage::CapturingFingerprint => "Capturing this machine's fingerprint.",
-            Stage::LoadingTrustedMachines => "Loading and authenticating trusted machine records.",
+            Stage::CapturingFingerprint => "Reading this machine's identity, so the capsule can recognise it later.",
+            Stage::LoadingTrustedMachines => "Checking the trusted machine records. An edited record is refused.",
             Stage::AcquiringLocation => "Requesting location from the operating system.",
-            Stage::DerivingKeys => "Deriving key material (Argon2id).",
-            Stage::CollectingFiles => "Collecting manifest: paths, modes, symlinks.",
+            Stage::DerivingKeys => "Deriving the payload key. Argon2id is deliberately slow - this is the step that makes guessing expensive.",
+            Stage::CollectingFiles => "Recording what is being protected: paths, permissions and symlinks.",
             Stage::SealingPayload => "Compressing and sealing chunks.",
             Stage::GeneratingProject => "Generating capsule source and vendoring runtime crates.",
             Stage::Done => "Capsule project ready.",

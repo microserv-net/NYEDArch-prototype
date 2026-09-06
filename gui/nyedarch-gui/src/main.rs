@@ -517,21 +517,35 @@ impl App {
             return;
         }
 
-        let default_name = format!(
-            "{}-capsule",
-            source.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "nyedarch".into())
-        );
-        let project_dir = match rfd::FileDialog::new()
-            .set_title("Where should the capsule project be created?")
-            .set_file_name(&default_name)
+        // Ask where the *capsule* goes, not where to put a project.
+        //
+        // The generated project is working material: it holds the runtime
+        // source, the vendored crates and the sealed package. Handing that to
+        // the user gave them six confusing items instead of one executable, and
+        // exposed a template the design deliberately does not ship (spec §22).
+        // It is now created under a temporary directory and removed afterwards.
+        let stem = source
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "nyedarch".into());
+        let capsule_path = match rfd::FileDialog::new()
+            .set_title("Where should the capsule be saved?")
+            .set_file_name(&format!("{stem}.nyarch"))
+            .add_filter("NYEDArch capsule", &["nyarch"])
             .save_file()
         {
             Some(p) => p,
             None => {
-                self.say(now, "Build cancelled: no output location chosen.");
+                self.say(now, "Build cancelled: no destination chosen.");
                 return;
             }
         };
+
+        let project_dir = std::env::temp_dir().join(format!(
+            "nyedarch-build-{}-{}",
+            std::process::id(),
+            now as u64
+        ));
 
         let schedule = if self.protections.time {
             match parse_hhmm(&self.protections.time_of_day) {
@@ -610,6 +624,7 @@ impl App {
             self.gh_token.trim().to_string(),
             self.repo_should_be_private(),
             self.selected_targets(),
+            capsule_path.clone(),
         ));
 
         let (tx, rx): (Sender<BuildMsg>, Receiver<BuildMsg>) = channel();
@@ -628,7 +643,7 @@ impl App {
             });
             match result {
                 Ok(o) => {
-                    if let Some((owner, repo, token, private, targets)) = remote {
+                    if let Some((owner, repo, token, private, targets, deliver)) = remote {
                         let _ = tx.send(BuildMsg::Note(
                             "Dispatching remote build on GitHub Actions.".to_string(),
                         ));
@@ -639,6 +654,7 @@ impl App {
                             private,
                             targets,
                             project_dir: &o.project_dir,
+                            deliver_to: Some(deliver.clone()),
                             build_id: nyedarch_core::Ulid::new().to_string(),
                             package_commitment: o.package_commitment,
                             runtime_commitment: o.runtime_commitment,
@@ -667,6 +683,9 @@ impl App {
                     for d in &o.diagnostics {
                         let _ = tx.send(BuildMsg::Note(format!("  {d}")));
                     }
+                    // The project was working material. Remove it: leaving it
+                    // behind is what put runtime source in the user's folder.
+                    let _ = std::fs::remove_dir_all(&o.project_dir);
                     let _ = tx.send(BuildMsg::Done {
                         project: o.project_dir,
                         bytes: o.package_bytes,
@@ -697,13 +716,14 @@ impl App {
                 }
                 BuildMsg::Note(m) => self.say(now, m),
                 BuildMsg::Done { project, bytes, machines, nonce } => {
+                    let _ = &project;
                     self.building = false;
                     self.cancel_flag = None;
                     self.build_progress = 1.0;
                     self.built_project = Some(project.clone());
                     self.build_rx = None;
                     self.say(now, format!("Sealed {bytes} bytes for {machines} machine(s), build {nonce:016x}."));
-                    self.say(now, format!("Capsule project written to {}", project.display()));
+                    self.say(now, "Working files removed.".to_string());
                     for d in std::mem::take(&mut self.pending_diagnostics) {
                         self.say(now, format!("  {d}"));
                     }
@@ -1117,7 +1137,7 @@ impl App {
         ui.add_space(6.0);
 
         let mut loc = self.protections.location;
-        let loc_h = if loc { 112.0 } else { 64.0 };
+        let loc_h = if loc { 138.0 } else { 66.0 };
         w::card_plain(ui, "p_loc", loc_h, t::SKY, loc, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -1150,7 +1170,7 @@ impl App {
 
         ui.add_space(8.0);
         let mut tm = self.protections.time;
-        let time_h = if tm { 118.0 } else { 64.0 };
+        let time_h = if tm { 146.0 } else { 66.0 };
         w::card_plain(ui, "p_time", time_h, t::SKY, tm, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -1185,7 +1205,7 @@ impl App {
 
         ui.add_space(8.0);
         let mut one = self.protections.one_shot;
-        w::card_plain(ui, "p_shot", 64.0, t::ROSE, one, |ui, _r, _l| {
+        w::card_plain(ui, "p_shot", 66.0, t::ROSE, one, |ui, _r, _l| {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.label(egui::RichText::new("One-shot capsule").size(t::H_SECTION).color(t::INK));
@@ -1663,9 +1683,12 @@ impl App {
 
         ui.add_space(16.0);
 
-        // Progress and the current stage, immediately above the log they
-        // describe. The bar's sheen keeps moving during a long stage, so it
-        // never looks frozen when the percentage stalls.
+        // No progress bar here.
+        //
+        // The perimeter pulse already reports that work is happening, and it
+        // does it from anywhere in the window. A second indicator for the same
+        // fact competes with it and adds nothing - the stage line below says
+        // what is happening, which a bar cannot.
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(if self.building {
@@ -1678,17 +1701,8 @@ impl App {
                 .size(t::SMALL)
                 .color(if self.building { t::SKY_DEEP } else { t::INK_SOFT }),
             );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(format!("{:.0}%", self.build_progress * 100.0))
-                        .size(t::SMALL)
-                        .color(t::INK_MUTED),
-                );
-            });
         });
-        ui.add_space(6.0);
-        w::progress_bar(ui, ui.available_width(), self.build_progress, self.building, now);
-        ui.add_space(14.0);
+        ui.add_space(10.0);
 
         let log_h = 150.0_f32.min(ui.available_height().max(90.0));
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), log_h), Sense::hover());
@@ -2144,7 +2158,7 @@ impl eframe::App for App {
         // the one screen where nothing should distract from a decision.
         if self.eula_accepted {
             let (speed, intensity) = if self.building {
-                (1.15, 1.0)
+                (1.15, 1.35)
             } else if self.build_progress >= 1.0 {
                 (0.26, 0.85)
             } else {

@@ -216,43 +216,6 @@ pub fn perimeter_pulse_at(ctx: &egui::Context, phase: f64, intensity: f32) {
 
 // -------------------------------------------------------------- progress ----
 
-/// A slim progress bar with a travelling sheen.
-///
-/// The sheen moves independently of the fill, so the bar still reads as "busy"
-/// during a long stage where the percentage barely changes — the moment a plain
-/// bar looks frozen and people assume a hang.
-pub fn progress_bar(ui: &mut Ui, width: f32, progress: f32, active: bool, time: f64) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 8.0), Sense::hover());
-    let p = progress.clamp(0.0, 1.0);
-    let r = Rounding::same(rect.height() / 2.0);
-
-    ui.painter().rect_filled(rect, r, t::SUNKEN);
-
-    if p > 0.001 {
-        let fill = Rect::from_min_size(rect.min, vec2(rect.width() * p, rect.height()));
-        gradient(ui.painter(), fill, t::SKY_BRIGHT, t::SKY);
-        ui.painter().rect_filled(fill, r, Color32::TRANSPARENT);
-
-        if active {
-            // Sheen: a soft highlight sweeping along the filled portion.
-            let sweep = ((time * 0.9) % 1.0) as f32;
-            let x = fill.left() + fill.width() * sweep;
-            let w = (fill.width() * 0.22).max(24.0);
-            let band = Rect::from_min_size(pos2(x - w * 0.5, fill.top()), vec2(w, fill.height()))
-                .intersect(fill);
-            if band.width() > 1.0 {
-                gradient(
-                    ui.painter(),
-                    band,
-                    t::alpha(Color32::WHITE, 0.45),
-                    t::alpha(Color32::WHITE, 0.10),
-                );
-            }
-        }
-    }
-    ui.painter().rect_stroke(rect, r, Stroke::new(1.0, t::alpha(t::LINE_STRONG, 0.8)));
-}
-
 // ------------------------------------------------------------------ mark ----
 
 /// The NYEDArch aperture: interlocking blades around a core.

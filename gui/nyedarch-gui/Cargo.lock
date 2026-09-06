@@ -2473,6 +2473,7 @@ dependencies = [
  "bincode",
  "clap",
  "getrandom 0.2.17",
+ "miniz_oxide 0.8.9",
  "nyedarch-core",
  "nyedarch-crypto",
  "nyedarch-fingerprint",

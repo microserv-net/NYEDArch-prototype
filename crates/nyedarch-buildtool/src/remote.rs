@@ -23,6 +23,13 @@ pub struct RemoteBuildArgs<'a> {
     pub project_dir: &'a Path,
     pub build_id: String,
     pub package_commitment: [u8; 32],
+    /// Where the finished capsule should be written.
+    ///
+    /// The user receives this file and nothing else. The generated project is
+    /// working material - it contains the runtime source, and handing it over
+    /// would both confuse the recipient and expose a template the design
+    /// deliberately does not ship (spec §22).
+    pub deliver_to: Option<std::path::PathBuf>,
     pub runtime_commitment: [u8; 32],
 }
 
@@ -181,13 +188,40 @@ pub fn run_remote_build_with(
     // Store the verified artifact next to the capsule project, so the build
     // ends with something the user can hand over rather than a run id (§45).
     if let Some(bytes) = &orch.last_artifact {
-        let dest = args.project_dir.join("artifact.zip");
-        match std::fs::write(&dest, bytes) {
-            Ok(()) => report(format!(
-                "Artifact verified against the committed package and saved to {}",
-                dest.display()
-            )),
-            Err(e) => report(format!("Artifact verified but could not be saved: {e}")),
+        // Unpack the capsule out of the artifact. The zip is a transport
+        // detail; nobody wants to be handed one.
+        match crate::artifact::capsule_from_artifact(bytes) {
+            Some(entry) => {
+                let dest = match &args.deliver_to {
+                    Some(p) => p.clone(),
+                    None => args.project_dir.join("capsule.nyarch"),
+                };
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(&dest, &entry.data) {
+                    Ok(()) => {
+                        // A capsule that cannot be run is not delivered.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &dest,
+                                std::fs::Permissions::from_mode(0o755),
+                            );
+                        }
+                        report(format!(
+                            "Capsule verified against the committed package and saved to {} ({} bytes)",
+                            dest.display(),
+                            entry.data.len()
+                        ));
+                    }
+                    Err(e) => report(format!("Capsule verified but could not be saved: {e}")),
+                }
+            }
+            None => report(
+                "The artifact was retrieved but no capsule could be read from it.".to_string(),
+            ),
         }
     } else {
         report(

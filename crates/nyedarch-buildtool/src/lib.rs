@@ -5,6 +5,7 @@
 //! no second implementation for the GUI to call: an interface that reports
 //! progress must be reporting real work.
 
+pub mod artifact;
 pub mod cli;
 pub mod config;
 pub mod eula;

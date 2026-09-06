@@ -176,6 +176,9 @@ fn main() {
             nyedarch_github::Target::MacosAppleSilicon,
         ];
         let ra = remote::RemoteBuildArgs {
+            // The command line hands the capsule to the project directory the
+            // operator already chose; the desktop client asks where to save it.
+            deliver_to: None,
             token: None,
             owner: &owner,
             repo: &repo,
