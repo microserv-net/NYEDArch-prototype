@@ -349,7 +349,26 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         }
 
         st!(BuildState::FetchArtifact);
-        let arts = self.transport.send(&ep::list_artifacts(&cfg.token, &cfg.owner, &cfg.repo, run_id))?;
+
+        // Retry the listing.
+        //
+        // A run reports completed slightly before its artifacts are queryable,
+        // so listing immediately can return an empty set for a build that
+        // succeeded - the client then reports "no artifact was retrieved" for a
+        // capsule that exists. Observed on a real runner.
+        let mut arts = self
+            .transport
+            .send(&ep::list_artifacts(&cfg.token, &cfg.owner, &cfg.repo, run_id))?;
+        for _ in 0..10 {
+            let text = String::from_utf8_lossy(&arts.body);
+            if ok(arts.status) && text.contains("\"id\":") {
+                break;
+            }
+            (self.sleep)(3);
+            arts = self
+                .transport
+                .send(&ep::list_artifacts(&cfg.token, &cfg.owner, &cfg.repo, run_id))?;
+        }
         if !ok(arts.status) {
             self.build_running = false;
             return Err(GhError::Status(arts.status));
