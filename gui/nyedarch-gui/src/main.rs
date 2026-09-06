@@ -839,6 +839,14 @@ impl App {
 
                     // Build: the action, plus where it happens.
                     ui.menu_button("Build", |ui| {
+                        // Status, not an action - a disabled button paints
+                        // nothing under this theme and reads as an empty gap.
+                        ui.label(
+                            egui::RichText::new("Capsules are always built remotely")
+                                .size(t::SMALL)
+                                .color(t::SKY_DEEP),
+                        );
+                        ui.separator();
                         let ready = self.ready_to_build() && !self.building;
                         if ui
                             .add_enabled(ready, egui::Button::new("Build capsule"))
@@ -1387,35 +1395,35 @@ impl App {
         // Credentials, not a switch. The build always happens remotely.
         let locked = self.gh_repo_locked;
         let mut unlock = false;
-        w::card_plain(ui, "gh", 148.0, t::SKY, false, |ui, _r, _l| {
-            ui.label(
-                egui::RichText::new("BUILD ACCOUNT")
-                    .size(t::MICRO)
-                    .color(t::INK_MUTED),
-            );
-            ui.add_space(8.0);
+        w::card_plain(ui, "gh", 168.0, t::SKY, false, |ui, rect, _l| {
+            ui.label(egui::RichText::new("BUILD ACCOUNT").size(t::MICRO).color(t::INK_MUTED));
+            ui.add_space(10.0);
+
+            // One label column for every row. Mixed ad-hoc spacing is what made
+            // the token row sit crooked and overflow the card.
+            let label_w = 96.0;
+            let field_w = (rect.width() - 36.0 - label_w).max(180.0);
 
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Account").size(t::SMALL).color(t::INK_SOFT));
-                ui.add_space(6.0);
+                ui.add_sized(
+                    vec2(label_w, 24.0),
+                    egui::Label::new(
+                        egui::RichText::new("Account").size(t::SMALL).color(t::INK_SOFT),
+                    ),
+                );
                 match &self.gh_owner_resolved {
-                    // Read from the token rather than typed: the token already
-                    // proves which account it belongs to, so asking would only
-                    // invite a mismatch.
+                    // Read from the token: it already proves which account it
+                    // belongs to, so asking would only invite a mismatch.
                     Some(o) => {
                         ui.label(egui::RichText::new(o).size(t::SMALL).color(t::INK));
-                        w::pill(
-                            ui.painter(),
-                            ui.cursor().min + vec2(6.0, 1.0),
-                            "from token",
-                            t::SKY_DEEP,
-                            t::SKY_WASH,
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("from token").size(t::MICRO).color(t::SKY_DEEP),
                         );
-                        ui.add_space(84.0);
                     }
                     None => {
                         ui.label(
-                            egui::RichText::new("resolved from the token")
+                            egui::RichText::new("resolved from the token once it is entered")
                                 .size(t::SMALL)
                                 .color(t::INK_MUTED),
                         );
@@ -1423,27 +1431,41 @@ impl App {
                 }
             });
 
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Repository").size(t::SMALL).color(t::INK_SOFT));
-                ui.add_space(6.0);
+                ui.add_sized(
+                    vec2(label_w, 24.0),
+                    egui::Label::new(
+                        egui::RichText::new("Repository").size(t::SMALL).color(t::INK_SOFT),
+                    ),
+                );
                 if locked {
                     ui.label(egui::RichText::new(&self.gh_repo).size(t::SMALL).color(t::INK));
-                    ui.add_space(8.0);
-                    if w::ghost_button(ui, "unlockrepo", "Change", 84.0).clicked() {
+                    ui.add_space(10.0);
+                    if w::ghost_button(ui, "unlockrepo", "Change", 82.0).clicked() {
                         unlock = true;
                     }
                 } else {
-                    w::field(ui, "gh_repo", &mut self.gh_repo, "repository", 220.0, false);
+                    w::field(ui, "gh_repo", &mut self.gh_repo, "repository", field_w, false);
                 }
             });
 
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT));
-                ui.add_space(6.0);
-                let w = ui.available_width() - 10.0;
-                w::field(ui, "gh_token", &mut self.gh_token, "personal access token, repo scope", w, true);
+                ui.add_sized(
+                    vec2(label_w, 24.0),
+                    egui::Label::new(
+                        egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT),
+                    ),
+                );
+                w::field(
+                    ui,
+                    "gh_token",
+                    &mut self.gh_token,
+                    "personal access token, repo scope",
+                    field_w,
+                    true,
+                );
             });
         });
         if unlock {

@@ -74,9 +74,15 @@ fn drop_shadow(painter: &egui::Painter, rect: Rect, strength: f32) {
 
 // ------------------------------------------------------- the perimeter pulse
 
-/// Corner radius of the light's path. Matches the window's own corners so the
-/// comet turns with the frame instead of cutting across it.
-const PULSE_RADIUS: f32 = 12.0;
+/// Corner radii of the light's path, top and bottom.
+///
+/// These match the *content area*, not an ideal rounded rectangle. The top two
+/// corners sit flush against the title bar and are square, so rounding them
+/// made the light curve away from a straight edge - which is exactly what
+/// looked wrong. The bottom corners follow the window itself, which is rounded
+/// on macOS and square elsewhere.
+const PULSE_RADIUS_TOP: f32 = 0.0;
+const PULSE_RADIUS_BOTTOM: f32 = if cfg!(target_os = "macos") { 10.0 } else { 0.0 };
 
 /// A point at fraction `t` (0..1) along a **rounded** rectangle's perimeter.
 ///
@@ -84,51 +90,60 @@ const PULSE_RADIUS: f32 = 12.0;
 /// corner while the frame curved away from it. Travelling an arc through each
 /// corner makes the two agree.
 fn perimeter_point(r: Rect, t: f32) -> Pos2 {
-    let rad = PULSE_RADIUS.min(r.width() * 0.5).min(r.height() * 0.5);
-    let sw = r.width() - 2.0 * rad; // straight run, horizontal
-    let sh = r.height() - 2.0 * rad; // straight run, vertical
-    let arc = std::f32::consts::FRAC_PI_2 * rad; // one quarter turn
-    let per = 2.0 * (sw + sh) + 4.0 * arc;
-    let mut d = t.rem_euclid(1.0) * per;
+    let lim = r.width().min(r.height()) * 0.5;
+    let rt = PULSE_RADIUS_TOP.min(lim);
+    let rb = PULSE_RADIUS_BOTTOM.min(lim);
+    let q = std::f32::consts::FRAC_PI_2;
 
-    // Top edge, left to right.
-    if d < sw {
-        return pos2(r.left() + rad + d, r.top());
+    // Segment lengths, clockwise from the top-left corner.
+    let top = r.width() - 2.0 * rt;
+    let arc_tr = q * rt;
+    let right = r.height() - rt - rb;
+    let arc_br = q * rb;
+    let bottom = r.width() - 2.0 * rb;
+    let arc_bl = q * rb;
+    let left = r.height() - rb - rt;
+    let arc_tl = q * rt;
+    let per = top + arc_tr + right + arc_br + bottom + arc_bl + left + arc_tl;
+
+    let mut d = t.rem_euclid(1.0) * per;
+    if d < top {
+        return pos2(r.left() + rt + d, r.top());
     }
-    d -= sw;
-    if d < arc {
-        let a = -std::f32::consts::FRAC_PI_2 + (d / arc) * std::f32::consts::FRAC_PI_2;
-        let c = pos2(r.right() - rad, r.top() + rad);
-        return pos2(c.x + rad * a.cos(), c.y + rad * a.sin());
+    d -= top;
+    if d < arc_tr {
+        let a = -q + (d / arc_tr.max(1e-6)) * q;
+        let c = pos2(r.right() - rt, r.top() + rt);
+        return pos2(c.x + rt * a.cos(), c.y + rt * a.sin());
     }
-    d -= arc;
-    if d < sh {
-        return pos2(r.right(), r.top() + rad + d);
+    d -= arc_tr;
+    if d < right {
+        return pos2(r.right(), r.top() + rt + d);
     }
-    d -= sh;
-    if d < arc {
-        let a = (d / arc) * std::f32::consts::FRAC_PI_2;
-        let c = pos2(r.right() - rad, r.bottom() - rad);
-        return pos2(c.x + rad * a.cos(), c.y + rad * a.sin());
+    d -= right;
+    if d < arc_br {
+        let a = (d / arc_br.max(1e-6)) * q;
+        let c = pos2(r.right() - rb, r.bottom() - rb);
+        return pos2(c.x + rb * a.cos(), c.y + rb * a.sin());
     }
-    d -= arc;
-    if d < sw {
-        return pos2(r.right() - rad - d, r.bottom());
+    d -= arc_br;
+    if d < bottom {
+        return pos2(r.right() - rb - d, r.bottom());
     }
-    d -= sw;
-    if d < arc {
-        let a = std::f32::consts::FRAC_PI_2 + (d / arc) * std::f32::consts::FRAC_PI_2;
-        let c = pos2(r.left() + rad, r.bottom() - rad);
-        return pos2(c.x + rad * a.cos(), c.y + rad * a.sin());
+    d -= bottom;
+    if d < arc_bl {
+        let a = q + (d / arc_bl.max(1e-6)) * q;
+        let c = pos2(r.left() + rb, r.bottom() - rb);
+        return pos2(c.x + rb * a.cos(), c.y + rb * a.sin());
     }
-    d -= arc;
-    if d < sh {
-        return pos2(r.left(), r.bottom() - rad - d);
+    d -= arc_bl;
+    if d < left {
+        return pos2(r.left(), r.bottom() - rb - d);
     }
-    d -= sh;
-    let a = std::f32::consts::PI + (d / arc) * std::f32::consts::FRAC_PI_2;
-    let c = pos2(r.left() + rad, r.top() + rad);
-    pos2(c.x + rad * a.cos(), c.y + rad * a.sin())
+    d -= left;
+    let a = std::f32::consts::PI + (d / arc_tl.max(1e-6)) * q;
+    let c = pos2(r.left() + rt, r.top() + rt);
+    pos2(c.x + rt * a.cos(), c.y + rt * a.sin())
 }
 
 /// The signature element: a thin comet of blacklight that circles the window
