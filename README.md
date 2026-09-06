@@ -4,7 +4,7 @@ Transforms passive data into an active, self-protecting executable capsule that
 carries its own protected data, authorization policy, decryption logic, and
 hostile-environment defenses.
 
-**Status: Prototype-I COMPLETE.** 162 tests passing, zero warnings, on Rust 1.91.1.
+**Status: Prototype-I COMPLETE.** 171 tests passing, plus an end-to-end remote delivery test on every push, zero warnings, on Rust 1.91.1.
 Verified on real Linux, macOS and Windows runners. See `docs/PROTOTYPE_I_COMPLETE.md`.
 
 Implementation is closed: from here Prototype-I changes only for interface work.

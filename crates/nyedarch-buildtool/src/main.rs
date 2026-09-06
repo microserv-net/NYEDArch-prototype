@@ -189,7 +189,7 @@ fn main() {
             package_commitment: file_digest(&project.join("capsule.nyeda")),
             runtime_commitment: [0u8; 32],
         };
-        match remote::run_remote_build(&ra) {
+        match remote::run_remote_build_with(&ra, |m| println!("[remote] {m}")) {
             Ok(id) => println!("[nyedarch] remote build {id} complete"),
             Err(e) => {
                 eprintln!("error: {e}");

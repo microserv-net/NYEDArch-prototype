@@ -717,50 +717,29 @@ impl App {
                         )));
                         let _ = tx.send(BuildMsg::Note("Working files removed.".to_string()));
                     } else {
-                        // The remote build did not deliver. Finish the job here
-                        // rather than handing over a directory and instructions.
+                        // No local fallback.
+                        //
+                        // Capsules are built remotely, and that is a security
+                        // property rather than a convenience: the build
+                        // environment is fixed, the artifact is checked against
+                        // a commitment made beforehand, and the toolchain is
+                        // not whatever happens to be on this machine. Quietly
+                        // compiling here when the remote build failed would
+                        // produce a capsule none of that applied to.
                         let _ = tx.send(BuildMsg::Note(
-                            "The remote build did not return a capsule.".to_string(),
+                            "No capsule was produced: the remote build did not return one."
+                                .to_string(),
                         ));
-                        let tx4 = tx.clone();
-                        match nyedarch_buildtool::pipeline::build_locally(&o.project_dir, move |l| {
-                            let _ = tx4.send(BuildMsg::Note(l));
-                        }) {
-                            Ok(built) => match std::fs::copy(&built, &deliver_check) {
-                                Ok(_) => {
-                                    #[cfg(unix)]
-                                    {
-                                        use std::os::unix::fs::PermissionsExt;
-                                        let _ = std::fs::set_permissions(
-                                            &deliver_check,
-                                            std::fs::Permissions::from_mode(0o755),
-                                        );
-                                    }
-                                    let _ = std::fs::remove_dir_all(&o.project_dir);
-                                    let _ = tx.send(BuildMsg::Note(format!(
-                                        "Capsule built here and saved to {}",
-                                        deliver_check.display()
-                                    )));
-                                    let _ = tx.send(BuildMsg::Note(
-                                        "Built for this platform only. Use the remote build for others."
-                                            .to_string(),
-                                    ));
-                                    let _ = tx.send(BuildMsg::Note("Working files removed.".into()));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(BuildMsg::Note(format!(
-                                        "The capsule was built but could not be saved: {e}"
-                                    )));
-                                }
-                            },
-                            Err(e) => {
-                                let _ = tx.send(BuildMsg::Note(format!("Local build failed: {e}")));
-                                let _ = tx.send(BuildMsg::Note(format!(
-                                    "The working files have been kept at {}",
-                                    o.project_dir.display()
-                                )));
-                            }
-                        }
+                        let _ = tx.send(BuildMsg::Note(
+                            "Nothing has been built locally - capsules are always built remotely."
+                                .to_string(),
+                        ));
+                        let _ = tx.send(BuildMsg::Note(
+                            "Check the workflow run on GitHub, then build again.".to_string(),
+                        ));
+                        // Working files are still removed: they are the runtime
+                        // source, and they are not a deliverable.
+                        let _ = std::fs::remove_dir_all(&o.project_dir);
                     }
                     let _ = tx.send(BuildMsg::Done {
                         project: o.project_dir,

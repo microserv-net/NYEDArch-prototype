@@ -187,3 +187,68 @@ authorization factors, whoever compiled it.
 **Not verified live:** this network cannot reach GitHub's artifact host
 (`objects.githubusercontent.com` is outside the allowlist), so the download path
 is exercised by tests rather than against the live service.
+
+
+---
+
+## 11. Delivery, and how it is verified
+
+The client delivers **one file**: the compiled capsule. Not a project, not a zip.
+
+```
+seal into a temporary directory
+      ↓
+push encrypted source, dispatch, wait for the run
+      ↓
+list artifacts, choose the one matching a requested target
+      ↓
+download, following the redirect to GitHub's storage host
+      ↓
+extract the capsule from the zip
+      ↓
+check the package commitment against the EXTRACTED capsule
+      ↓
+write it where the user asked, with the execute bit set
+      ↓
+delete the artifact from GitHub, remove the working directory
+```
+
+**There is no local build.** Capsules are built remotely, and that is a security
+property rather than a convenience: the build environment is fixed, the artifact
+is checked against a commitment made beforehand, and the toolchain is not
+whatever happens to be on the operator's machine. A local fallback existed
+briefly and was removed - quietly compiling on the client when the remote build
+failed would produce a capsule none of those properties applied to.
+
+### Three delivery bugs, and why unit tests missed all of them
+
+Each of these passed every existing test and still meant the user received
+nothing usable.
+
+| Bug | Effect |
+|---|---|
+| Redirects were not followed | The download answered 302 and the client treated it as failure |
+| The provenance check ran on the **zip** | The capsule inside is deflated, so the commitment could never be found: every build was refused |
+| The **first** artifact was taken | A macOS build handed back a Windows binary, which does not run |
+
+They have one thing in common: every component worked, and the path between them
+did not. That is what `.github/workflows/e2e.yml` now covers.
+
+### The end-to-end test
+
+Runs on every push and pull request. It drives the **shipped command-line
+client** against real GitHub with a real token, then asserts:
+
+- the client reports a saved capsule - a build that "succeeds" and delivers
+  nothing is a failure;
+- the file exists, is executable, and `file` identifies it as a binary **for
+  this platform**, which catches the wrong-artifact bug;
+- running it reproduces the original tree byte for byte, including a nested
+  directory, which a flat-file test would not;
+- a wrong passphrase is refused and leaves no output;
+- **no runtime source** sits beside the delivered capsule - no `Cargo.toml`,
+  `src`, `vendor`, `unlock` or `stage-capsule.sh` (spec §22).
+
+It needs `NYEDARCH_BUILD_TOKEN` on the repository. A fork will not have it, so
+the job warns and skips rather than failing for a reason a contributor cannot
+fix.

@@ -361,7 +361,24 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         // earlier version only listed artifacts and left a comment saying
         // verification happened "on download" - there was no download.
         let listing = String::from_utf8_lossy(&arts.body).to_string();
-        if let Some(id) = first_artifact_id(&listing) {
+        let all = artifact_list(&listing);
+
+        // Pick the artifact for a requested target rather than whichever came
+        // first. Building for macOS and receiving a Windows binary is not a
+        // cosmetic problem: the capsule simply will not run.
+        let wanted = inputs
+            .targets
+            .iter()
+            .map(|t| t.rust_target().to_string())
+            .collect::<Vec<_>>();
+        let chosen = all
+            .iter()
+            .find(|(_, name)| wanted.iter().any(|w| name.contains(w.as_str())))
+            .or_else(|| all.first())
+            .map(|(id, name)| (*id, name.clone()));
+
+        if let Some((id, name)) = chosen {
+            let _ = &name;
             let blob = self
                 .transport
                 .send(&ep::download_artifact(&cfg.token, &cfg.owner, &cfg.repo, id))?;
@@ -391,6 +408,31 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
     }
 }
 
+/// Every `(id, name)` pair in an artifacts listing.
+///
+/// The listing is ordered by GitHub, not by us, so taking the first entry
+/// delivers whichever target happens to be listed first - a Windows binary to
+/// someone who asked for macOS. Callers pick by name instead.
+fn artifact_list(text: &str) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("\"id\":") {
+        rest = &rest[i + 5..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(id) = digits.parse::<u64>() else { continue };
+        // The name follows the id in each artifact object.
+        let name = match rest.find("\"name\":\"") {
+            Some(j) => {
+                let after = &rest[j + 8..];
+                after.split('"').next().unwrap_or("").to_string()
+            }
+            None => String::new(),
+        };
+        out.push((id, name));
+    }
+    out
+}
+
 /// The newest run id in a runs listing. GitHub returns them most-recent first.
 fn newest_run_id(body: &[u8]) -> Option<u64> {
     let text = String::from_utf8_lossy(body);
@@ -400,13 +442,6 @@ fn newest_run_id(body: &[u8]) -> Option<u64> {
     rest[..end].parse().ok()
 }
 
-/// The first artifact id in a listing response.
-fn first_artifact_id(text: &str) -> Option<u64> {
-    let i = text.find("\"id\":")? + 5;
-    let rest = text[i..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit())?;
-    rest[..end].parse().ok()
-}
 
 /// Does the downloaded artifact actually carry the package we sealed?
 ///
@@ -480,7 +515,7 @@ mod prune_tests {
 
 #[cfg(test)]
 mod artifact_tests {
-    use super::{artifact_carries_package, first_artifact_id};
+    use super::artifact_carries_package;
 
     /// An artifact that carries the committed package passes; one that does not
     /// is refused. GitHub is an untrusted build environment, so "the build
@@ -505,11 +540,26 @@ mod artifact_tests {
         assert!(!artifact_carries_package(b"short", &commitment));
     }
 
+    /// The artifact must be chosen by target, not by position.
+    ///
+    /// GitHub orders the listing; taking the first entry handed a Windows
+    /// binary to someone building for macOS, which simply does not run.
     #[test]
-    fn the_first_artifact_id_is_extracted() {
-        let listing = r#"{"total_count":1,"artifacts":[{"id":123456789,"name":"nyedarch-capsule"}]}"#;
-        assert_eq!(first_artifact_id(listing), Some(123456789));
-        assert_eq!(first_artifact_id("{}"), None);
+    fn artifacts_are_listed_with_their_names() {
+        let listing = r#"{"total_count":3,"artifacts":[
+          {"id":1,"name":"nyedarch-capsule-x86_64-pc-windows-msvc"},
+          {"id":2,"name":"nyedarch-capsule-aarch64-apple-darwin"},
+          {"id":3,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu"}]}"#;
+        let all = super::artifact_list(listing);
+        assert_eq!(all.len(), 3);
+
+        let mac = all
+            .iter()
+            .find(|(_, n)| n.contains("aarch64-apple-darwin"))
+            .expect("the macOS artifact is findable by name");
+        assert_eq!(mac.0, 2, "selection must not depend on listing order");
+
+        assert!(super::artifact_list("{}").is_empty());
     }
 }
 
