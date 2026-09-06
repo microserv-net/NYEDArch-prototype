@@ -83,8 +83,16 @@ jobs:
           # The client must have said where it put the capsule. A build that
           # "succeeds" and delivers nothing is the failure this job exists for.
           if ! grep -q "Capsule verified against the committed package and saved to" /tmp/remote.log; then
+            # Emitted as annotations, not just printed.
+            #
+            # Step output lives in the job log, which is only reachable through
+            # GitHub's storage host - blocked on some networks, including the
+            # one this is developed on. Annotations come back from the checks
+            # API, so the reason a build failed is readable everywhere.
             echo "::error::the remote build did not deliver a capsule"
-            tail -40 /tmp/remote.log
+            tail -25 /tmp/remote.log | while IFS= read -r line; do
+              echo "::error::remote: ${line}"
+            done
             exit 1
           fi
 
