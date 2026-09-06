@@ -106,9 +106,18 @@ jobs:
           NYEDARCH_PASSPHRASE: e2e-passphrase-not-a-secret-2026
         run: |
           set -e
-          CAP=$(grep -o "saved to [^ ]*" /tmp/remote.log | tail -1 | cut -d' ' -f3)
-          echo "capsule: $CAP"
-          test -f "$CAP"
+          # The path is followed by a byte count in parentheses, so take the
+          # word after "saved to" and strip anything trailing.
+          CAP=$(grep -o "saved to [^ ]*" /tmp/remote.log | tail -1 | awk '{print $3}')
+          echo "capsule: [$CAP]"
+          if [ ! -f "$CAP" ]; then
+            echo "::error::no file at the reported path: $CAP"
+            grep -n "saved to" /tmp/remote.log | tail -3 | while IFS= read -r l; do
+              echo "::error::log: $l"
+            done
+            ls -la "$(dirname "$CAP")" || true
+            exit 1
+          fi
           chmod +x "$CAP"
 
           # It must be an executable for this platform, not another target's
@@ -116,8 +125,17 @@ jobs:
           file "$CAP" | tee /tmp/file.txt
           grep -qi "ELF" /tmp/file.txt
 
-          "$CAP" /tmp/e2e-out
-          diff -r /tmp/e2e-src /tmp/e2e-out/e2e-src
+          if ! "$CAP" /tmp/e2e-out; then
+            echo "::error::the capsule refused to open with the correct passphrase"
+            exit 1
+          fi
+          if ! diff -r /tmp/e2e-src /tmp/e2e-out/e2e-src; then
+            echo "::error::the extracted tree does not match the original"
+            find /tmp/e2e-out -maxdepth 3 | head -20 | while IFS= read -r l; do
+              echo "::error::out: $l"
+            done
+            exit 1
+          fi
 
           # And a wrong passphrase must be refused, leaving nothing behind.
           if NYEDARCH_PASSPHRASE=wrong "$CAP" /tmp/e2e-bad; then
