@@ -150,7 +150,7 @@ jobs:
       # through the contents API, which is the difference between diagnosing a
       # failure and guessing at it.
       - name: Commit the log to the branch
-        if: failure() && steps.token.outputs.have == 'true' && github.event_name != 'pull_request'
+        if: failure() && steps.token.outputs.have == 'true'
         continue-on-error: true
         run: |
           mkdir -p e2e-results
