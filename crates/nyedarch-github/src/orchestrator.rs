@@ -454,7 +454,6 @@ fn artifact_list(text: &str) -> Vec<(u64, String)> {
         rest = &rest[i + 5..];
         let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
         let Ok(id) = digits.parse::<u64>() else { continue };
-        // The name follows the id in each artifact object.
         let name = match rest.find("\"name\":\"") {
             Some(j) => {
                 let after = &rest[j + 8..];
@@ -462,7 +461,17 @@ fn artifact_list(text: &str) -> Vec<(u64, String)> {
             }
             None => String::new(),
         };
-        out.push((id, name));
+        // Keep only real artifacts.
+        //
+        // An artifacts response nests other objects that also carry an "id" -
+        // the workflow run, the repository, the uploading actor. Scanning for
+        // every "id" therefore produced ids that are not artifacts, paired with
+        // whatever name happened to follow them, and downloading one of those
+        // returns nothing. Every capsule artifact is named for the build, so
+        // that is the filter.
+        if name.starts_with("nyedarch-capsule") {
+            out.push((id, name));
+        }
     }
     out
 }
@@ -483,11 +492,20 @@ fn artifact_list(text: &str) -> Vec<(u64, String)> {
 fn run_ids(body: &[u8]) -> std::collections::BTreeSet<u64> {
     let text = String::from_utf8_lossy(body);
     let mut out = std::collections::BTreeSet::new();
-    let mut rest = &text[..];
-    while let Some(i) = rest.find("\"id\":") {
-        rest = &rest[i + 5..];
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(id) = digits.parse::<u64>() {
+
+    // Only the id that opens a run object.
+    //
+    // A runs response nests a repository, an actor and a head commit, each with
+    // its own id. Collecting all of them filled the "already seen" set with
+    // numbers that are not runs - and could make an unrelated id look like a
+    // newly dispatched run.
+    for chunk in text.split("\"id\":").skip(1) {
+        let digits: String = chunk.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(id) = digits.parse::<u64>() else { continue };
+        // A run object carries these fields; a nested repository or actor does
+        // not. Checking a short window keeps this cheap.
+        let window = &chunk[..chunk.len().min(400)];
+        if window.contains("\"workflow_id\"") || window.contains("\"run_number\"") {
             out.insert(id);
         }
     }
@@ -604,15 +622,24 @@ mod artifact_tests {
     /// artifacts that were long gone.
     #[test]
     fn only_a_genuinely_new_run_is_adopted() {
-        let before = super::run_ids(br#"{"workflow_runs":[{"id":300},{"id":200},{"id":100}]}"#);
-        assert_eq!(before.len(), 3);
+        let listing = |ids: &[u64]| {
+            let runs: Vec<String> = ids
+                .iter()
+                .map(|i| format!(r#"{{"id":{i},"run_number":1,"workflow_id":7,"repository":{{"id":42}}}}"#))
+                .collect();
+            format!(r#"{{"workflow_runs":[{}]}}"#, runs.join(",")).into_bytes()
+        };
+
+        let before = super::run_ids(&listing(&[300, 200, 100]));
+        assert_eq!(before.len(), 3, "the nested repository id must not be counted");
+        assert!(!before.contains(&42), "a repository id is not a run id");
 
         // Nothing new yet: the client must keep waiting.
-        let same = super::run_ids(br#"{"workflow_runs":[{"id":300},{"id":200},{"id":100}]}"#);
+        let same = super::run_ids(&listing(&[300, 200, 100]));
         assert!(same.into_iter().find(|id| !before.contains(id)).is_none());
 
         // A new run appears.
-        let after = super::run_ids(br#"{"workflow_runs":[{"id":400},{"id":300},{"id":200}]}"#);
+        let after = super::run_ids(&listing(&[400, 300, 200]));
         assert_eq!(after.into_iter().find(|id| !before.contains(id)), Some(400));
 
         // A failed listing is an empty set, which matches nothing - so the
@@ -647,6 +674,22 @@ mod artifact_tests {
             chosen.1.contains(host),
             "selection must land on the host platform, not on listing order"
         );
+    }
+
+    /// Nested objects in the response also carry an "id".
+    ///
+    /// A response contains the workflow run, the repository and the uploading
+    /// actor, each with its own id. Treating those as artifacts produced ids
+    /// that download to nothing - "no artifact was retrieved" for a build that
+    /// had produced three.
+    #[test]
+    fn nested_ids_are_not_mistaken_for_artifacts() {
+        let listing = r#"{"total_count":1,"artifacts":[
+          {"id":555,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu",
+           "workflow_run":{"id":999,"repository_id":777,"head_repository_id":888}}]}"#;
+        let all = super::artifact_list(listing);
+        assert_eq!(all.len(), 1, "only the artifact itself counts: {all:?}");
+        assert_eq!(all[0].0, 555);
     }
 
     #[test]
