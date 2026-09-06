@@ -23,6 +23,13 @@ pub struct RemoteBuildArgs<'a> {
     pub project_dir: &'a Path,
     pub build_id: String,
     pub package_commitment: [u8; 32],
+    /// Where the finished capsule should be written.
+    ///
+    /// The user receives this file and nothing else. The generated project is
+    /// working material - it contains the runtime source, and handing it over
+    /// would both confuse the recipient and expose a template the design
+    /// deliberately does not ship (spec §22).
+    pub deliver_to: Option<std::path::PathBuf>,
     pub runtime_commitment: [u8; 32],
 }
 
@@ -181,13 +188,57 @@ pub fn run_remote_build_with(
     // Store the verified artifact next to the capsule project, so the build
     // ends with something the user can hand over rather than a run id (§45).
     if let Some(bytes) = &orch.last_artifact {
-        let dest = args.project_dir.join("artifact.zip");
-        match std::fs::write(&dest, bytes) {
-            Ok(()) => report(format!(
-                "Artifact verified against the committed package and saved to {}",
-                dest.display()
-            )),
-            Err(e) => report(format!("Artifact verified but could not be saved: {e}")),
+        // Unpack the capsule out of the artifact. The zip is a transport
+        // detail; nobody wants to be handed one.
+        match crate::artifact::capsule_from_artifact(bytes) {
+            Some(entry) => {
+                // Provenance, checked on the *extracted* capsule.
+                //
+                // The build environment is untrusted, so a build that reported
+                // success is not evidence it produced the right binary. The
+                // capsule embeds the sealed package, so the commitment made
+                // before the build must appear in it.
+                if !nyedarch_github::orchestrator::artifact_carries_package(
+                    &entry.data,
+                    &args.package_commitment,
+                ) {
+                    report(
+                        "The artifact does not carry the package this build committed to. \
+                         It has been refused and not saved."
+                            .to_string(),
+                    );
+                    return Ok(run_id);
+                }
+                let dest = match &args.deliver_to {
+                    Some(p) => p.clone(),
+                    None => args.project_dir.join("capsule.nyarch"),
+                };
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(&dest, &entry.data) {
+                    Ok(()) => {
+                        // A capsule that cannot be run is not delivered.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &dest,
+                                std::fs::Permissions::from_mode(0o755),
+                            );
+                        }
+                        report(format!(
+                            "Capsule verified against the committed package and saved to {} ({} bytes)",
+                            dest.display(),
+                            entry.data.len()
+                        ));
+                    }
+                    Err(e) => report(format!("Capsule verified but could not be saved: {e}")),
+                }
+            }
+            None => report(
+                "The artifact was retrieved but no capsule could be read from it.".to_string(),
+            ),
         }
     } else {
         report(
@@ -211,6 +262,35 @@ fn source_commitment(files: &[(String, Vec<u8>)]) -> [u8; 32] {
         h.update(b);
     }
     h.finalize().into()
+}
+
+/// Who does this token belong to?
+///
+/// The build repository lives under an account, and the API needs to know
+/// which. Asking the user to type it is asking them to repeat something the
+/// token already proves - and to get it wrong. This reads the login from the
+/// token itself, so the field can be shown as a fact rather than a question.
+pub fn resolve_owner(token: Option<String>) -> Result<String, String> {
+    let token = token.or_else(self::token).ok_or_else(|| {
+        "no GitHub token found. Set NYEDARCH_GITHUB_TOKEN (preferred) or GITHUB_TOKEN.".to_string()
+    })?;
+    let transport = CurlTransport::new();
+    if !transport.available() {
+        return Err("`curl` was not found; it is used as the HTTP transport.".to_string());
+    }
+    let r = transport
+        .send(&nyedarch_github::endpoints::authenticated_user(&token))
+        .map_err(|e| format!("could not identify the token's account: {e}"))?;
+    if !(200..300).contains(&r.status) {
+        return Err(format!("GitHub refused the token ({})", r.status));
+    }
+    let body = String::from_utf8_lossy(&r.body);
+    // "login" is the account name the repository will be created under.
+    let i = body.find("\"login\"").ok_or("no login in the response")? + 7;
+    let rest = body[i..].trim_start().trim_start_matches(':').trim_start();
+    let rest = rest.strip_prefix('"').ok_or("unexpected response shape")?;
+    let end = rest.find('"').ok_or("unexpected response shape")?;
+    Ok(rest[..end].to_string())
 }
 
 /// Change a repository's visibility.

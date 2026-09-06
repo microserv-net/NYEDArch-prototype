@@ -12,6 +12,8 @@ license = "UNLICENSED"
 eframe = "0.27"
 # Native file dialogs. Without this the picker cannot open a real chooser.
 rfd = "0.14"
+# Decodes the application icon at start-up. Client-side only.
+image = { version = "0.25", default-features = false, features = ["png"] }
 egui = "0.27"
 nyedarch-core = { path = "../../crates/nyedarch-core" }
 nyedarch-crypto = { path = "../../crates/nyedarch-crypto" }

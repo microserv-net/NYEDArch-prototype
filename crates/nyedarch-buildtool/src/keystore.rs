@@ -479,3 +479,98 @@ mod tests {
         }
     }
 }
+
+// --------------------------------------------------------- stored secrets ---
+
+/// Where a client secret lives on disk.
+///
+/// Beside the machine records rather than in the platform keystore: a token is
+/// larger and longer than a key, and the keystore APIs across three platforms
+/// disagree about size limits. It is encrypted with a key derived from the
+/// master key, so the file alone is useless.
+fn secret_path(label: &str) -> std::path::PathBuf {
+    let mut d = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .or_else(|| std::env::var_os("APPDATA").map(std::path::PathBuf::from))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    d.push("nyedarch");
+    d.push("secrets");
+    d.push(format!("{label}.bin"));
+    d
+}
+
+/// Store a client secret, encrypted under a key derived from the master key.
+///
+/// The GitHub token is the case this exists for. Retyping it on every build
+/// invites the two things that actually go wrong with tokens: pasting the wrong
+/// one, and leaving it in a shell history.
+pub fn save_secret(label: &str, value: &[u8]) -> Result<(), String> {
+    let key = derive(format!("secret:{label}").as_bytes())?;
+    let sealed = nyedarch_crypto::aead::seal(&key, label.as_bytes(), value)
+        .map_err(|_| "could not encrypt the secret".to_string())?
+        .to_bytes();
+    let path = secret_path(label);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create the store: {e}"))?;
+    }
+    std::fs::write(&path, sealed).map_err(|e| format!("cannot write the secret: {e}"))?;
+    restrict_path(&path);
+    Ok(())
+}
+
+/// Load a stored secret. Returns `None` when absent or unreadable — a secret
+/// that cannot be decrypted is treated as absent rather than as an error, so a
+/// rotated master key means "enter it again" rather than a broken client.
+pub fn load_secret(label: &str) -> Option<Zeroizing<Vec<u8>>> {
+    let key = derive(format!("secret:{label}").as_bytes()).ok()?;
+    let bytes = std::fs::read(secret_path(label)).ok()?;
+    let sealed = nyedarch_crypto::aead::Sealed::from_bytes(&bytes).ok()?;
+    let plain = nyedarch_crypto::aead::open(&key, label.as_bytes(), &sealed).ok()?;
+    Some(Zeroizing::new(plain.to_vec()))
+}
+
+/// Forget a stored secret.
+pub fn forget_secret(label: &str) {
+    let _ = std::fs::remove_file(secret_path(label));
+}
+
+fn restrict_path(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_round_trips_and_can_be_forgotten() {
+        let label = format!("test-{}", std::process::id());
+        save_secret(&label, b"ghp_not_a_real_token").expect("save");
+        let got = load_secret(&label).expect("load");
+        assert_eq!(&got[..], b"ghp_not_a_real_token");
+        forget_secret(&label);
+        assert!(load_secret(&label).is_none(), "a forgotten secret must not come back");
+    }
+
+    /// The stored file must not contain the secret in the clear.
+    #[test]
+    fn the_stored_file_is_not_plaintext() {
+        let label = format!("test-plain-{}", std::process::id());
+        save_secret(&label, b"SECRET-MARKER-VALUE").expect("save");
+        let raw = std::fs::read(secret_path(&label)).expect("read");
+        assert!(
+            !raw.windows(19).any(|w| w == b"SECRET-MARKER-VALUE"),
+            "the secret was written in the clear"
+        );
+        forget_secret(&label);
+    }
+}

@@ -49,11 +49,11 @@ impl Stage {
     }
     pub fn message(&self) -> &'static str {
         match self {
-            Stage::CapturingFingerprint => "Capturing this machine's fingerprint.",
-            Stage::LoadingTrustedMachines => "Loading and authenticating trusted machine records.",
+            Stage::CapturingFingerprint => "Reading this machine's identity, so the capsule can recognise it later.",
+            Stage::LoadingTrustedMachines => "Checking the trusted machine records. An edited record is refused.",
             Stage::AcquiringLocation => "Requesting location from the operating system.",
-            Stage::DerivingKeys => "Deriving key material (Argon2id).",
-            Stage::CollectingFiles => "Collecting manifest: paths, modes, symlinks.",
+            Stage::DerivingKeys => "Deriving the payload key. Argon2id is deliberately slow - this is the step that makes guessing expensive.",
+            Stage::CollectingFiles => "Recording what is being protected: paths, permissions and symlinks.",
             Stage::SealingPayload => "Compressing and sealing chunks.",
             Stage::GeneratingProject => "Generating capsule source and vendoring runtime crates.",
             Stage::Done => "Capsule project ready.",
@@ -501,4 +501,47 @@ pub fn runtime_source_root() -> PathBuf {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("crates"))
+}
+
+/// Compile a generated capsule project on this machine.
+///
+/// The remote build is how a capsule is produced for *other* platforms, and it
+/// stays the default. But when it cannot deliver - no network, a failed run, a
+/// timeout - the client used to hand the user a directory and tell them to run
+/// `stage-capsule.sh` themselves. That is the client's job: it has the project,
+/// it knows where the capsule goes, and asking someone to run a shell script to
+/// finish a build they already started is not a product.
+///
+/// Returns the path of the compiled capsule inside the project.
+pub fn build_locally(
+    project_dir: &std::path::Path,
+    mut on_line: impl FnMut(String),
+) -> Result<std::path::PathBuf, String> {
+    on_line("Building the capsule on this machine.".to_string());
+    on_line("This compiles the capsule's own source, so it takes a minute.".to_string());
+
+    let out = std::process::Command::new("cargo")
+        .args(["build", "--release"])
+        .current_dir(project_dir)
+        .env("CARGO_INCREMENTAL", "0")
+        .output()
+        .map_err(|e| format!("could not run cargo: {e}. Is the Rust toolchain installed?"))?;
+
+    if !out.status.success() {
+        // The compiler's own words are far more useful than "build failed".
+        let err = String::from_utf8_lossy(&out.stderr);
+        for line in err.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+            on_line(line.to_string());
+        }
+        return Err("the capsule did not compile on this machine".to_string());
+    }
+
+    let mut candidate = project_dir.join("target/release/nyedarch-capsule");
+    if !candidate.exists() {
+        candidate = project_dir.join("target/release/nyedarch-capsule.exe");
+    }
+    if !candidate.exists() {
+        return Err("the build reported success but produced no capsule".to_string());
+    }
+    Ok(candidate)
 }

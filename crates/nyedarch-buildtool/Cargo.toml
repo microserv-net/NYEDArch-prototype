@@ -25,6 +25,7 @@ getrandom = { workspace = true }
 zeroize = { workspace = true }
 # Client-side only. clap never reaches a generated capsule: the capsule crate
 # does not depend on this one.
+miniz_oxide = "0.8"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 sha2 = "0.10"
 

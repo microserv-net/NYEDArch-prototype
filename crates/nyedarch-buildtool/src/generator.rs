@@ -238,14 +238,69 @@ const ONE_SHOT: bool = {one_shot};
 struct StdinPass;
 impl PassphraseProvider for StdinPass {{
     fn passphrase(&self) -> Option<Zeroizing<Vec<u8>>> {{
-        // Prototype: read from NYEDARCH_PASSPHRASE env or stdin. The GUI supplies a
-        // masked field. No manual location/time entry is ever offered (spec §33).
+        use std::io::Write as _;
+
+        // Scripted use: no prompt, no terminal needed.
         if let Ok(p) = std::env::var("NYEDARCH_PASSPHRASE") {{
             return Some(Zeroizing::new(p.into_bytes()));
         }}
+
+        // Ask, and flush.
+        //
+        // Without the flush the prompt sits in the buffer and the capsule looks
+        // frozen: the user sees nothing and assumes it has hung.
+        print!("NYEDArch: passphrase: ");
+        let _ = std::io::stdout().flush();
+
+        // Turn off echo so the passphrase is not left on screen or in a scroll
+        // buffer. Best effort - if `stty` is unavailable the prompt still works,
+        // it just echoes, which is better than refusing to run.
+        // stderr is discarded: when input is piped rather than typed, `stty`
+        // complains about the device and that noise would appear above the
+        // prompt for no reason.
+        let echo_off = std::process::Command::new("stty")
+            .args(["-echo"])
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        // Read ONE LINE.
+        //
+        // This used to be `read_to_string`, which waits for end of input rather
+        // than end of line: the user typed a passphrase, pressed Enter, and the
+        // capsule kept waiting for Ctrl-D. That is the "it just hangs" bug.
         let mut s = String::new();
-        std::io::stdin().read_to_string(&mut s).ok()?;
-        Some(Zeroizing::new(s.trim_end().as_bytes().to_vec()))
+        let read = std::io::stdin().read_line(&mut s);
+
+        if echo_off {{
+            let _ = std::process::Command::new("stty")
+                .args(["echo"])
+                .stdin(std::process::Stdio::inherit())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            println!();
+        }}
+
+        match read {{
+            // End of input with nothing typed: not a terminal, and no
+            // environment variable either. Say what to do instead of failing
+            // silently.
+            Ok(0) => {{
+                eprintln!();
+                eprintln!("NYEDArch: no passphrase could be read.");
+                eprintln!("Run this capsule from a terminal, or set NYEDARCH_PASSPHRASE.");
+                None
+            }}
+            Ok(_) => {{
+                let trimmed = s.trim_end_matches(['\r', '\n']);
+                Some(Zeroizing::new(trimmed.as_bytes().to_vec()))
+            }}
+            Err(_) => None,
+        }}
     }}
 }}
 
@@ -423,5 +478,46 @@ mod hardening_tests {
         for setting in ["lto = true", "strip = true", "panic = \"abort\"", "codegen-units = 1"] {
             assert!(cargo.contains(setting), "the unlocker lost `{setting}`");
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    /// The capsule must read **one line**, not until end of input.
+    ///
+    /// `read_to_string` waits for EOF, so a user who typed a passphrase and
+    /// pressed Enter saw nothing happen and concluded the capsule had hung. It
+    /// had not - it was waiting for Ctrl-D. This is the regression guard.
+    #[test]
+    fn the_passphrase_is_read_a_line_at_a_time() {
+        let src = include_str!("generator.rs");
+        // The needles are assembled at run time. Written as literals they
+        // would appear in this file and the test would match itself.
+        let one_line = format!("read_{}(&mut s)", "line");
+        let till_eof = format!("read_to_{}(&mut s)", "string");
+        assert!(src.contains(&one_line), "the capsule must read one line");
+        assert!(
+            !src.contains(&till_eof),
+            "reading to end of input waits for EOF and makes the capsule look hung"
+        );
+    }
+
+    /// The prompt must be flushed, or it sits in the buffer and the capsule
+    /// looks frozen before it has even read anything.
+    #[test]
+    fn the_prompt_is_flushed() {
+        let src = include_str!("generator.rs");
+        let at = src.find("passphrase: ").expect("a prompt exists");
+        let after = &src[at..at + 200];
+        assert!(after.contains("flush()"), "the prompt must be flushed immediately");
+    }
+
+    /// With no terminal and no environment variable, the capsule must say what
+    /// to do rather than failing silently.
+    #[test]
+    fn an_unreadable_passphrase_explains_itself() {
+        let src = include_str!("generator.rs");
+        assert!(src.contains("no passphrase could be read"));
+        assert!(src.contains("NYEDARCH_PASSPHRASE"));
     }
 }

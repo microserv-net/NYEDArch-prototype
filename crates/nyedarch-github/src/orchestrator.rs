@@ -375,13 +375,13 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
                         .transport
                         .send(&ep::delete_artifact(&cfg.token, &cfg.owner, &cfg.repo, id));
                 }
-                if !artifact_carries_package(&blob.body, &inputs.package_commitment) {
-                    // The build environment is untrusted, so an artifact that
-                    // does not carry the package we committed to is refused
-                    // rather than handed to the user.
-                    self.build_running = false;
-                    return Err(GhError::Provenance);
-                }
+                // The provenance check does NOT run here.
+                //
+                // GitHub returns the artifact as a zip and the capsule inside
+                // it is deflated, so the commitment cannot appear in these
+                // bytes. Checking here refused every build and delivered
+                // nothing. It runs on the extracted capsule instead, in the
+                // caller, which is where the commitment actually is.
             }
         }
 
