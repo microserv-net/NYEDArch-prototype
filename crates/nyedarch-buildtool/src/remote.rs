@@ -192,6 +192,23 @@ pub fn run_remote_build_with(
         // detail; nobody wants to be handed one.
         match crate::artifact::capsule_from_artifact(bytes) {
             Some(entry) => {
+                // Provenance, checked on the *extracted* capsule.
+                //
+                // The build environment is untrusted, so a build that reported
+                // success is not evidence it produced the right binary. The
+                // capsule embeds the sealed package, so the commitment made
+                // before the build must appear in it.
+                if !nyedarch_github::orchestrator::artifact_carries_package(
+                    &entry.data,
+                    &args.package_commitment,
+                ) {
+                    report(
+                        "The artifact does not carry the package this build committed to. \
+                         It has been refused and not saved."
+                            .to_string(),
+                    );
+                    return Ok(run_id);
+                }
                 let dest = match &args.deliver_to {
                     Some(p) => p.clone(),
                     None => args.project_dir.join("capsule.nyarch"),

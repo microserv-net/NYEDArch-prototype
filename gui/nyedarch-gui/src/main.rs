@@ -147,6 +147,8 @@ struct App {
     /// The build repository name. Locked until the user chooses to change it,
     /// because a wrong name here silently creates a second repository.
     gh_repo_locked: bool,
+    /// Locked once a token has been stored, so it is not retyped every build.
+    gh_token_locked: bool,
     /// Resolved from the token, not typed. None until first resolved.
     gh_owner_resolved: Option<String>,
     /// GitHub credentials. The token is held in memory for this session only
@@ -203,6 +205,13 @@ impl Default for App {
         // Capturing here confirms the fingerprint engine works before the user
         // reaches the Machines step; the registry reports the live value.
         let _ = nyedarch_fingerprint::capture();
+
+        // A token saved on a previous run. Stored encrypted under a key derived
+        // from the client master key, beside the machine records.
+        let stored_token = nyedarch_buildtool::keystore::load_secret("github-token")
+            .map(|t| String::from_utf8_lossy(&t).to_string())
+            .unwrap_or_default();
+        let token_locked = !stored_token.is_empty();
         Self {
             step: Step::Source,
             step_changed_at: 0.0,
@@ -211,6 +220,8 @@ impl Default for App {
             passphrase: String::new(),
             protections: Protections::default(),
             gh_repo_locked: true,
+            // Restored from the encrypted store if one was saved earlier.
+            gh_token_locked: token_locked,
             gh_owner_resolved: None,
             // Pre-fill from the environment if present, exactly as the CLI does.
             gh_owner: String::new(),
@@ -278,7 +289,12 @@ impl App {
             Step::Source => !self.source_path.trim().is_empty(),
             Step::Protections => self.passphrase_acceptable(),
             Step::Machines => true, // the creator machine is always trusted
-            Step::Targets => self.target_windows || self.target_macos || self.target_linux,
+            Step::Targets => {
+                // A target with no token is not a step you can proceed from:
+                // the build is remote, so it cannot start without credentials.
+                (self.target_windows || self.target_macos || self.target_linux)
+                    && !self.gh_token.trim().is_empty()
+            }
             Step::Build => self.build_progress >= 1.0,
             Step::Run => self.run_ok,
         }
@@ -627,6 +643,9 @@ impl App {
             capsule_path.clone(),
         ));
 
+        // Checked by the worker to decide whether the working files can go.
+        let deliver_check = capsule_path.clone();
+
         let (tx, rx): (Sender<BuildMsg>, Receiver<BuildMsg>) = channel();
         self.build_rx = Some(rx);
         self.cancel_flag = Some(cancel.clone());
@@ -670,10 +689,6 @@ impl App {
                             }
                             Err(e) => {
                                 let _ = tx.send(BuildMsg::Note(format!("Remote build failed: {e}")));
-                                let _ = tx.send(BuildMsg::Note(
-                                    "The capsule project was still written; you can build it locally."
-                                        .to_string(),
-                                ));
                             }
                         }
                     }
@@ -683,9 +698,38 @@ impl App {
                     for d in &o.diagnostics {
                         let _ = tx.send(BuildMsg::Note(format!("  {d}")));
                     }
-                    // The project was working material. Remove it: leaving it
-                    // behind is what put runtime source in the user's folder.
-                    let _ = std::fs::remove_dir_all(&o.project_dir);
+                    // Only discard the working files if the capsule actually
+                    // arrived.
+                    //
+                    // The previous version deleted them unconditionally, right
+                    // after logging "the project was still written; you can
+                    // build it locally" - so when the remote build failed or
+                    // timed out, the user was left with nothing at all and a
+                    // message pointing at a directory that had just been
+                    // removed. Working material is only worth deleting once
+                    // there is something better to keep.
+                    let delivered = deliver_check.exists();
+                    if delivered {
+                        let _ = std::fs::remove_dir_all(&o.project_dir);
+                        let _ = tx.send(BuildMsg::Note(format!(
+                            "Capsule saved to {}",
+                            deliver_check.display()
+                        )));
+                        let _ = tx.send(BuildMsg::Note("Working files removed.".to_string()));
+                    } else {
+                        let _ = tx.send(BuildMsg::Note(
+                            "No capsule was delivered, so the working files have been kept."
+                                .to_string(),
+                        ));
+                        let _ = tx.send(BuildMsg::Note(format!(
+                            "They are at {}",
+                            o.project_dir.display()
+                        )));
+                        let _ = tx.send(BuildMsg::Note(
+                            "Run stage-capsule.sh there to build the capsule on this machine."
+                                .to_string(),
+                        ));
+                    }
                     let _ = tx.send(BuildMsg::Done {
                         project: o.project_dir,
                         bytes: o.package_bytes,
@@ -1414,7 +1458,10 @@ impl App {
 
         // Credentials, not a switch. The build always happens remotely.
         let locked = self.gh_repo_locked;
+        let token_locked = self.gh_token_locked;
         let mut unlock = false;
+        let mut save_token = false;
+        let mut change_token = false;
         w::card_plain(ui, "gh", 168.0, t::SKY, false, |ui, rect, _l| {
             ui.label(egui::RichText::new("BUILD ACCOUNT").size(t::MICRO).color(t::INK_MUTED));
             ui.add_space(10.0);
@@ -1478,18 +1525,58 @@ impl App {
                         egui::RichText::new("Token").size(t::SMALL).color(t::INK_SOFT),
                     ),
                 );
-                w::field(
-                    ui,
-                    "gh_token",
-                    &mut self.gh_token,
-                    "personal access token, repo scope",
-                    field_w,
-                    true,
-                );
+                if token_locked {
+                    // Never shown again once stored, not even masked: there is
+                    // no reason to put it back on screen.
+                    ui.label(egui::RichText::new("saved on this machine").size(t::SMALL).color(t::INK));
+                    ui.add_space(10.0);
+                    if w::ghost_button(ui, "changetoken", "Change", 82.0).clicked() {
+                        change_token = true;
+                    }
+                } else {
+                    w::field(
+                        ui,
+                        "gh_token",
+                        &mut self.gh_token,
+                        "personal access token, repo scope",
+                        field_w - 96.0,
+                        true,
+                    );
+                    ui.add_space(8.0);
+                    if w::ghost_button(ui, "savetoken", "Save", 82.0).clicked() {
+                        save_token = true;
+                    }
+                }
             });
         });
         if unlock {
             self.gh_repo_locked = false;
+        }
+        if save_token {
+            let value = self.gh_token.trim().to_string();
+            if value.is_empty() {
+                self.toast(now, "Enter a token first", t::ROSE);
+            } else {
+                match nyedarch_buildtool::keystore::save_secret("github-token", value.as_bytes()) {
+                    Ok(()) => {
+                        self.gh_token_locked = true;
+                        self.gh_owner_resolved = None; // re-resolve under the new token
+                        self.say(now, "Token stored, encrypted, on this machine.");
+                        self.toast(now, "Token saved", t::SKY);
+                    }
+                    Err(e) => {
+                        self.say(now, format!("Could not store the token: {e}"));
+                        self.toast(now, "Token not saved", t::ROSE);
+                    }
+                }
+            }
+        }
+        if change_token {
+            nyedarch_buildtool::keystore::forget_secret("github-token");
+            self.gh_token.clear();
+            self.gh_token_locked = false;
+            self.gh_owner_resolved = None;
+            self.say(now, "Stored token removed. Enter a new one.");
         }
 
         ui.add_space(10.0);
@@ -2158,11 +2245,11 @@ impl eframe::App for App {
         // the one screen where nothing should distract from a decision.
         if self.eula_accepted {
             let (speed, intensity) = if self.building {
-                (1.15, 1.35)
+                (0.68, 1.30)
             } else if self.build_progress >= 1.0 {
-                (0.26, 0.85)
+                (0.16, 0.85)
             } else {
-                (0.20, 0.78)
+                (0.115, 0.78)
             };
             // Ease between speeds so a build starting or finishing accelerates
             // smoothly rather than jumping.

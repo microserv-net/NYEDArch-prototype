@@ -178,3 +178,55 @@ mod tests {
         assert!(capsule_from_artifact(&z).is_none());
     }
 }
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    /// The commitment lives in the capsule, not in the archive around it.
+    ///
+    /// The check originally ran on the raw artifact bytes. GitHub deflates the
+    /// capsule inside the zip, so the commitment was never present there: every
+    /// build was refused and nothing was ever delivered. This asserts the two
+    /// halves of that - invisible before extraction, present after.
+    #[test]
+    fn the_commitment_is_only_visible_after_extraction() {
+        let commitment = [0x7Cu8; 32];
+
+        // A capsule carrying the commitment, in compressible surroundings so
+        // deflate genuinely rewrites the bytes.
+        let mut capsule = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".repeat(64);
+        capsule.extend_from_slice(&commitment);
+        capsule.extend_from_slice(&b"BBBBBBBBBBBBBBBB".repeat(64));
+
+        let deflated = miniz_oxide::deflate::compress_to_vec(&capsule, 6);
+
+        let mut zip = Vec::new();
+        zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        zip.extend_from_slice(&[20, 0]);
+        zip.extend_from_slice(&[0, 0]);
+        zip.extend_from_slice(&8u16.to_le_bytes()); // deflate
+        zip.extend_from_slice(&[0, 0, 0, 0]);
+        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&(deflated.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(capsule.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(b"nyedarch-capsule".len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(b"nyedarch-capsule");
+        zip.extend_from_slice(&deflated);
+
+        let in_archive = zip.windows(32).any(|w| w == commitment);
+        assert!(
+            !in_archive,
+            "the commitment must not be findable in the compressed archive - \
+             if it were, this test could not catch the bug it exists for"
+        );
+
+        let entry = capsule_from_artifact(&zip).expect("the capsule extracts");
+        assert!(
+            entry.data.windows(32).any(|w| w == commitment),
+            "the commitment must be present once the capsule is extracted"
+        );
+        assert_eq!(entry.data, capsule, "extraction must be exact");
+    }
+}
