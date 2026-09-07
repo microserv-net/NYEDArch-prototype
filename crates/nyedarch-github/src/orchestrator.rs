@@ -83,6 +83,13 @@ pub struct Orchestrator<'a, T: Transport, S: SecretSealer> {
     /// The downloaded artifact, kept so the caller can write it out after the
     /// provenance check has passed.
     pub last_artifact: Option<Vec<u8>>,
+    /// What the artifact step actually saw: how many artifacts, which was
+    /// chosen, what the download returned. Reported by the caller.
+    ///
+    /// Without this, "no artifact was retrieved" covers an empty listing, an
+    /// unmatched name and a failed download equally - three different problems
+    /// behind one sentence, which is why they took three rounds to separate.
+    pub last_fetch_note: String,
     /// How many times to poll for run completion before giving up.
     pub max_wait_polls: u32,
     /// Seconds between polls.
@@ -100,6 +107,7 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
             sealer,
             build_running: false,
             last_artifact: None,
+            last_fetch_note: String::new(),
             // ~20 minutes: long enough for a three-target build, bounded so a
             // stuck run cannot hang the client forever.
             max_wait_polls: 80,
@@ -411,12 +419,23 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
             .or_else(|| all.first())
             .map(|(id, name)| (*id, name.clone()));
 
+        self.last_fetch_note = format!(
+            "artifacts listed: {} [{}]; wanted host or {:?}",
+            all.len(),
+            all.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", "),
+            wanted
+        );
+
         if let Some((id, name)) = chosen {
-            let _ = &name;
+            self.last_fetch_note.push_str(&format!("; chose {name} (id {id})"));
             let blob = self
                 .transport
                 .send(&ep::download_artifact(&cfg.token, &cfg.owner, &cfg.repo, id))?;
+            self.last_fetch_note
+                .push_str(&format!("; download status {}", blob.status));
             if ok(blob.status) {
+                self.last_fetch_note
+                    .push_str(&format!("; {} bytes", blob.body.len()));
                 self.last_artifact = Some(blob.body.clone());
                 // Retrieved and verified, so the remote copy is no longer
                 // needed. It is the capsule binary itself, and on a public
