@@ -254,8 +254,18 @@ pub fn run_remote_build_with(
             ),
         }
     } else {
+        // What the artifact step actually saw.
+        //
+        // "No artifact was retrieved" covers an empty listing, a name that
+        // matched nothing, and a failed download equally - three different
+        // problems behind one sentence. The orchestrator records the detail;
+        // this is the line that was supposed to print it, and did not, because
+        // the edit that added it never matched and nobody checked.
+        if !orch.last_fetch_note.is_empty() {
+            report(format!("artifact step: {}", orch.last_fetch_note));
+        }
         report(
-            "No artifact was retrieved. The build may still be running, or the artifact was not              reachable from this network."
+            "No artifact was retrieved. The build may still be running, or the artifact was not reachable from this network."
                 .to_string(),
         );
     }

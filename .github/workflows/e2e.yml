@@ -180,36 +180,9 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-      # Post the log as a commit comment.
+      # No commit-comment fallback.
       #
-      # An uploaded artifact needs GitHub's storage host, which some networks
-      # block, and pushing a file back needs a writable checkout - which after
-      # actions/checkout is a detached HEAD, so the step reported success while
-      # committing to nowhere. A comment is a plain API write and is readable
-      # wherever the API is.
-      - name: Report the failure where it can be read
-        if: failure() && steps.token.outputs.have == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BODY=$(printf '### e2e failure\n\n```\n%s\n```\n' "$(tail -60 /tmp/remote.log 2>/dev/null || echo 'no log')")
-          python3 - "$BODY" <<'EOF'
-          import json, os, sys, urllib.request
-          body = sys.argv[1]
-          req = urllib.request.Request(
-              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/commits/{os.environ['GITHUB_SHA']}/comments",
-              data=json.dumps({"body": body}).encode(),
-              headers={
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "nyedarch-ci",
-              },
-              method="POST",
-          )
-          try:
-              with urllib.request.urlopen(req) as r:
-                  print("comment posted:", r.status)
-          except Exception as e:
-              print("could not post comment:", e)
-          EOF
+      # It failed with 403 on every run: the workflow GITHUB_TOKEN is
+      # "Contents: read", so it cannot comment. A step that can never succeed is
+      # worse than no step - it looks like a safety net and is not one.
+      # Annotations are the channel that works here.
