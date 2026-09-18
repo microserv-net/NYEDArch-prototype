@@ -919,7 +919,7 @@ pub fn vault_core(
     progress: f32,
     working: bool,
     time: f64,
-) {
+) -> Option<usize> {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
     let c = rect.center();
     let p = progress.clamp(0.0, 1.0);
@@ -954,6 +954,14 @@ pub fn vault_core(
         );
     }
 
+    // Rings are clickable: the object is the navigation.
+    //
+    // A ring names a protection, so clicking it should take you to that
+    // protection. Making the reader of state also the control for it removes a
+    // whole layer of indirection - you point at the thing you mean.
+    let mut clicked = None;
+    let hover_pos = ui.ctx().pointer_latest_pos();
+
     // Four rings, innermost first, each a protection.
     for (i, on) in engaged.iter().enumerate() {
         let id = ui.id().with(("vault_ring", i));
@@ -961,6 +969,22 @@ pub fn vault_core(
         let e = t::ease_out_back(lock).clamp(0.0, 1.15);
 
         let radius = base * (0.40 + 0.13 * i as f32);
+
+        // Hit test against the ring's band rather than a rectangle, so the
+        // target is the shape the user can actually see.
+        let band = 13.0_f32;
+        let over = hover_pos
+            .map(|m| {
+                let d = ((m.x - c.x).powi(2) + (m.y - c.y).powi(2)).sqrt();
+                (d - radius).abs() < band && rect.contains(m)
+            })
+            .unwrap_or(false);
+        if over && resp.hovered() && ui.input(|i| i.pointer.primary_clicked()) {
+            clicked = Some(i);
+        }
+        let ring_hover = ui
+            .ctx()
+            .animate_bool_with_time(ui.id().with(("ring_hover", i)), over, 0.12);
         // Unlocked rings drift; a locked one snaps to its detent and stays.
         let drift = (spin as f32) * (0.5 + 0.2 * i as f32) * (1.0 - lock);
         let detent = i as f32 * 0.45;
@@ -982,7 +1006,13 @@ pub fn vault_core(
                     pos2(c.x + radius * a0.cos(), c.y + radius * a0.sin()),
                     pos2(c.x + radius * a1.cos(), c.y + radius * a1.sin()),
                 ],
-                Stroke::new(2.0 + 1.6 * e, t::alpha(colour, 0.30 + 0.70 * lock)),
+                Stroke::new(
+                    2.4_f32 + 2.0 * e + 1.4 * ring_hover,
+                    t::alpha(
+                        t::mix(colour, t::SKY_BRIGHT, ring_hover),
+                        (0.62 + 0.38 * lock + 0.30 * ring_hover).min(1.0),
+                    ),
+                ),
             );
         }
 
@@ -1040,6 +1070,27 @@ pub fn vault_core(
         );
     }
 
+    // Name whatever the cursor is over. A ring that lights up without saying
+    // what it is teaches nothing.
+    const RING_NAMES: [&str; 4] = ["Machine", "Passphrase", "Location", "Time window"];
+    if let Some(m) = hover_pos {
+        if rect.contains(m) {
+            for (i, name) in RING_NAMES.iter().enumerate() {
+                let radius = base * (0.40 + 0.13 * i as f32);
+                let d = ((m.x - c.x).powi(2) + (m.y - c.y).powi(2)).sqrt();
+                if (d - radius).abs() < 13.0 {
+                    painter.text(
+                        pos2(c.x, rect.top() + 10.0),
+                        Align2::CENTER_CENTER,
+                        if engaged[i] { format!("{name} · engaged") } else { format!("{name} · off") },
+                        t::font(t::SMALL),
+                        t::SKY_DEEP,
+                    );
+                }
+            }
+        }
+    }
+
     let engaged_n = engaged.iter().filter(|e| **e).count();
     painter.text(
         pos2(c.x, rect.bottom() - 6.0),
@@ -1052,6 +1103,7 @@ pub fn vault_core(
         t::font(t::MICRO),
         if p >= 1.0 { t::SKY_DEEP } else { t::INK_MUTED },
     );
+    clicked
 }
 
 // ----------------------------------------------------------------- spine ---

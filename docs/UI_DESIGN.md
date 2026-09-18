@@ -105,6 +105,15 @@ Nothing on it is decorative:
 | Spin rate | Idle, working, or done |
 | Violet sweep | A build is running |
 
+**The rings are the navigation.** Pointing at one names it and what state it is
+in; clicking it goes to that protection, and toggles the optional ones straight
+from the object. The two mandatory rings only navigate - they cannot be switched
+off, and a control that silently ignores a click is worse than one that is
+obviously fixed.
+
+Making the reader of state also the control for it removes a layer of
+indirection: you point at the thing you mean.
+
 It leans very slightly toward the pointer, which is enough to feel like an object
 rather than a printed diagram, and not enough to distract.
 

@@ -2306,7 +2306,7 @@ impl eframe::App for App {
                 let mut stage_ui =
                     ui.child_ui(stage, egui::Layout::top_down(egui::Align::Center));
                 stage_ui.add_space((stage.height() * 0.24).min(120.0));
-                w::vault_core(
+                let ring_clicked = w::vault_core(
                     &mut stage_ui,
                     stage_w.min(236.0),
                     [
@@ -2319,6 +2319,28 @@ impl eframe::App for App {
                     self.building,
                     now,
                 );
+
+                // Clicking a ring goes to the protection it names, and toggles
+                // the optional ones straight from the object. The two mandatory
+                // rings only navigate: they cannot be switched off, and a
+                // control that silently ignores a click is worse than one that
+                // is obviously fixed.
+                if let Some(ring) = ring_clicked {
+                    self.goto(Step::Protections, now);
+                    match ring {
+                        2 => {
+                            self.protections.location = !self.protections.location;
+                            let on = self.protections.location;
+                            self.say(now, if on { "Location protection on." } else { "Location protection off." });
+                        }
+                        3 => {
+                            self.protections.time = !self.protections.time;
+                            let on = self.protections.time;
+                            self.say(now, if on { "Time window on." } else { "Time window off." });
+                        }
+                        _ => self.say(now, "That protection is always on and cannot be disabled."),
+                    }
+                }
 
                 // A hairline between the object and the work, so the eye knows
                 // they are two things rather than one crowded column.
