@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Draw the NYEDArch application icon.
 
-A small, extremely chonky block of data that has decided it is a fortress:
-stubby arms, a helmet two sizes too big, a shoulder missile pod, a riot shield,
-a bandolier, and a minigun it can barely hold up.
+A very round cat, extremely armed, entirely unbothered.
 
-The joke is the product's thesis. This is not a file waiting to be protected.
+The joke is the product's thesis. The data is not nervous about being out in the
+open - it is carrying, and it does not care that you know. The nonchalance is
+what makes it funny: half-lidded eyes, a flat little mouth, two oversized
+sidearms held like they weigh nothing.
 
 Three things that matter in the drawing:
 
@@ -14,10 +15,12 @@ Three things that matter in the drawing:
 * **Supersampled 4x, then reduced.** Pillow does not anti-alias, so anything
   drawn at final size comes out jagged. Drawing large and shrinking with Lanczos
   is what makes the curves clean.
-* **Everything is a fraction of the canvas**, so it regenerates at any size.
+* **Everything is a fraction of the canvas**, so it regenerates at any size, and
+  the silhouette is checked at 32 px where most icons fall apart.
 """
 
 from PIL import Image, ImageDraw, ImageFilter
+import math
 import os
 
 # The interface palette, so the icon belongs to the same product.
@@ -35,10 +38,11 @@ WHITE = (255, 255, 255)
 AMBER = (245, 158, 11)
 AMBER_DARK = (180, 83, 9)
 ROSE = (244, 63, 94)
+PINK = (249, 168, 212)
 
-SS = 4          # supersampling factor
-BASE = 1024     # nominal size
-S = BASE * SS   # working canvas
+SS = 4
+BASE = 1024
+S = BASE * SS
 
 
 def p(f):
@@ -50,6 +54,42 @@ def ell(d, cx, cy, rx, ry, **kw):
     d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], **kw)
 
 
+def pistol(d, gx, gy, sgn, scale, ow):
+    """One chunky sidearm, gripped at (gx, gy) and angled outward and down.
+
+    The first attempt drew a long horizontal slab from the paw, which read as a
+    stick rather than a weapon and stuck out past the canvas edges. Real pistol
+    proportions - short slide, deep grip, visible trigger guard - are legible
+    even at 32 px, where a thin rectangle is just a line.
+    """
+    import math as _m
+    a = _m.radians(18 * (1 if sgn > 0 else -1))  # tipped down, outward
+    ca, sa = _m.cos(a), _m.sin(a)
+
+    def at(u, v):
+        u = u * sgn
+        return (gx + p(u * scale) * ca - p(v * scale) * sa,
+                gy + p(u * scale) * sa + p(v * scale) * ca)
+
+    # Grip: wide, angled back under the paw.
+    d.polygon([at(-0.028, 0.005), at(0.030, 0.005), at(0.020, 0.105), at(-0.052, 0.092)],
+              fill=STEEL_DARK, outline=INK, width=ow)
+    # Slide: short and deep, the part that says "pistol".
+    d.polygon([at(-0.060, -0.070), at(0.128, -0.070), at(0.128, 0.006), at(-0.060, 0.006)],
+              fill=STEEL, outline=INK, width=ow)
+    # Muzzle cap.
+    d.polygon([at(0.128, -0.060), at(0.160, -0.060), at(0.160, -0.004), at(0.128, -0.004)],
+              fill=STEEL_DARK, outline=INK, width=ow)
+    # Trigger guard: a loop, which is what makes it read as a handgun.
+    d.polygon([at(0.000, 0.006), at(0.062, 0.006), at(0.056, 0.054), at(0.006, 0.054)],
+              fill=STEEL_DARK, outline=INK, width=ow)
+    # Sky stripe along the slide, so the weapons belong to this product.
+    d.line([at(-0.040, -0.048), at(0.112, -0.048)], fill=SKY_BRIGHT,
+           width=int(p(0.012 * scale)))
+    # A small muzzle flash hint: one violet spark, the product's "active" colour.
+    ell(d, *at(0.176, -0.032), p(0.013 * scale), p(0.013 * scale), fill=VIOLET)
+
+
 def draw_master():
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -57,151 +97,157 @@ def draw_master():
     cx = p(0.50)
     ow = int(p(0.009))
 
-    bx0, bx1 = p(0.268), p(0.732)
-    by0, by1 = p(0.372), p(0.762)
-    corner = p(0.125)
-
-    # A soft contact shadow, so the character stands on something.
+    # A soft contact shadow, so the chonk has weight.
     shadow = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     sd = ImageDraw.Draw(shadow)
-    ell(sd, cx, p(0.812), p(0.240), p(0.052), fill=(15, 23, 42, 80))
-    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(p(0.016))))
+    ell(sd, cx, p(0.845), p(0.255), p(0.048), fill=(15, 23, 42, 85))
+    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(p(0.015))))
 
-    # ------------------------------------------------------ missile pod -----
-    mx0, my0 = p(0.258), p(0.392)
-    d.rounded_rectangle([mx0 - p(0.118), my0 - p(0.088), mx0 + p(0.088), my0 + p(0.058)],
-                        radius=p(0.032), fill=STEEL_DARK, outline=INK, width=ow)
-    for i in range(2):
-        for j in range(2):
-            tx = mx0 - p(0.084) + i * p(0.064)
-            ty = my0 - p(0.052) + j * p(0.060)
-            ell(d, tx, ty, p(0.025), p(0.025), fill=STEEL, outline=INK, width=int(ow * 0.7))
-            ell(d, tx, ty, p(0.011), p(0.011), fill=ROSE)
-    d.polygon([(mx0 + p(0.088), my0 - p(0.086)), (mx0 + p(0.156), my0 - p(0.156)),
-               (mx0 + p(0.156), my0 - p(0.070)), (mx0 + p(0.088), my0 - p(0.018))],
-              fill=STEEL, outline=INK, width=ow)
-
-    # ------------------------------------------------------- riot shield ----
-    sx, sy = p(0.778), p(0.556)
-    d.polygon(
-        [
-            (sx - p(0.132), sy - p(0.208)),
-            (sx + p(0.116), sy - p(0.162)),
-            (sx + p(0.126), sy + p(0.116)),
-            (sx - p(0.010), sy + p(0.238)),
-            (sx - p(0.132), sy + p(0.112)),
-        ],
-        fill=STEEL_LIGHT, outline=INK, width=ow,
-    )
-    d.line([(sx - p(0.062), sy - p(0.022)), (sx - p(0.004), sy + p(0.050)),
-            (sx + p(0.064), sy - p(0.040))], fill=SKY, width=int(p(0.026)), joint="curve")
-    for ry_ in (-0.132, 0.072):
-        for rx_ in (-0.096, 0.082):
-            ell(d, sx + p(rx_), sy + p(ry_), p(0.011), p(0.011), fill=STEEL)
-
-    # -------------------------------------------------------------- body ----
-    d.rounded_rectangle([bx0, by0, bx1, by1], radius=corner, fill=SKY)
-    d.rounded_rectangle([cx + p(0.058), by0, bx1, by1], radius=corner, fill=SKY_DEEP)
-    d.rounded_rectangle([bx0, by0, bx1, by1], radius=corner, outline=INK, width=ow)
-    d.rounded_rectangle([bx0 + p(0.022), by0 + p(0.016), bx1 - p(0.155), by0 + p(0.078)],
-                        radius=p(0.031), fill=SKY_LIGHT)
-    for f in (0.62, 0.74):
-        y = by0 + (by1 - by0) * f
-        d.line([(bx0 + p(0.030), y), (bx1 - p(0.030), y)], fill=SKY_SHADOW, width=int(p(0.008)))
-
-    # ------------------------------------------------------------ helmet ----
-    hy = by0 + p(0.010)
-
-    # A helmet wraps the head. The first attempt was a semicircle sitting on a
-    # long flat bar, which reads as a mushroom cap however it is coloured: the
-    # brim, not the dome, was doing all the silhouette work.
+    # ------------------------------------------------------------- tail -----
+    # A single curl on the right, sweeping out and up with a visible tip.
     #
-    # This is a dome that comes down past the temples, with ear pads at the
-    # sides and only a short lip at the front - the shape a helmet actually has.
-    ell(d, cx, hy - p(0.012), p(0.250), p(0.152), fill=STEEL_DARK, outline=INK, width=ow)
-    # Flatten the underside so it sits on the head rather than floating.
-    d.rectangle([cx - p(0.250), hy - p(0.012), cx + p(0.250), hy + p(0.066)], fill=STEEL_DARK)
-    d.line([(cx - p(0.250), hy - p(0.012)), (cx - p(0.250), hy + p(0.066))], fill=INK, width=ow)
-    d.line([(cx + p(0.250), hy - p(0.012)), (cx + p(0.250), hy + p(0.066))], fill=INK, width=ow)
+    # Two earlier attempts failed differently: one swung it into empty canvas as
+    # a detached blob, the other wrapped it so far around the body that it read
+    # as a shadow ring. A tail needs a start, one bend, and an end.
+    tail_pts = []
+    for i in range(24):
+        t = i / 23.0
+        ang = math.radians(150 - 120 * t)
+        r = p(0.215) + p(0.130) * t
+        tail_pts.append((cx + r * math.cos(ang) * -1.0, p(0.700) - r * math.sin(ang) * 0.42))
+    for i, (tx, ty) in enumerate(tail_pts):
+        t = i / (len(tail_pts) - 1)
+        w = p(0.052) * (1.0 - 0.40 * t)
+        ell(d, tx, ty, w, w, fill=SKY_DEEP)
+    # Pale tip, so the end of the tail is legible against the body.
+    ell(d, tail_pts[-1][0], tail_pts[-1][1], p(0.030), p(0.030), fill=SKY_LIGHT)
 
-    # Ear pads.
+    # ------------------------------------------------------------- body -----
+    # One big round blob. The chonk is the silhouette, so it has to be the
+    # largest simple shape in the icon.
+    body_cy = p(0.615)
+    ell(d, cx, body_cy, p(0.268), p(0.225), fill=SKY, outline=INK, width=ow)
+    # Right-side shading for volume.
+    d.chord([cx - p(0.268), body_cy - p(0.225), cx + p(0.268), body_cy + p(0.225)],
+            -70, 110, fill=SKY_DEEP)
+    ell(d, cx, body_cy, p(0.268), p(0.225), outline=INK, width=ow)
+    # Pale belly.
+    ell(d, cx, body_cy + p(0.055), p(0.150), p(0.128), fill=SKY_LIGHT)
+
+    # ------------------------------------------------------------ head ------
+    head_cy = p(0.395)
+    head_rx, head_ry = p(0.245), p(0.205)
+
+    # Ears, behind the head so the outline stays clean.
     for sgn in (-1, 1):
-        d.rounded_rectangle(
-            [cx + sgn * p(0.250) - p(0.050), hy + p(0.006),
-             cx + sgn * p(0.250) + p(0.050), hy + p(0.104)],
-            radius=p(0.030), fill=STEEL, outline=INK, width=ow,
+        base_x = cx + sgn * p(0.150)
+        d.polygon(
+            [
+                (base_x - sgn * p(0.075), head_cy - p(0.150)),
+                (base_x + sgn * p(0.060), head_cy - p(0.310)),
+                (base_x + sgn * p(0.090), head_cy - p(0.110)),
+            ],
+            fill=SKY, outline=INK, width=ow,
+        )
+        # Inner ear.
+        d.polygon(
+            [
+                (base_x - sgn * p(0.035), head_cy - p(0.160)),
+                (base_x + sgn * p(0.052), head_cy - p(0.262)),
+                (base_x + sgn * p(0.062), head_cy - p(0.140)),
+            ],
+            fill=PINK,
         )
 
-    # Front lip, short and centred.
-    d.rounded_rectangle([cx - p(0.150), hy + p(0.058), cx + p(0.150), hy + p(0.104)],
-                        radius=p(0.022), fill=STEEL, outline=INK, width=ow)
-
-    # Crest stripe.
-    d.rounded_rectangle([cx - p(0.024), hy - p(0.166), cx + p(0.024), hy + p(0.044)],
-                        radius=p(0.012), fill=SKY_BRIGHT)
-
-    # Antenna and beacon.
-    d.line([(cx + p(0.176), hy - p(0.128)), (cx + p(0.228), hy - p(0.278))],
-           fill=INK, width=int(p(0.015)))
-    ell(d, cx + p(0.230), hy - p(0.292), p(0.034), p(0.034), fill=ROSE, outline=INK, width=int(ow * 0.7))
-    ell(d, cx + p(0.220), hy - p(0.303), p(0.012), p(0.012), fill=(255, 210, 220))
-
-    # -------------------------------------------------------------- face ----
-    eye_y = by0 + p(0.148)
+    ell(d, cx, head_cy, head_rx, head_ry, fill=SKY, outline=INK, width=ow)
+    # Cheek floof: two bumps that make the head read as round rather than oval.
     for sgn in (-1, 1):
-        ex = cx + sgn * p(0.082)
-        ell(d, ex, eye_y, p(0.062), p(0.068), fill=WHITE, outline=INK, width=int(ow * 0.8))
-        ell(d, ex + sgn * p(0.012), eye_y + p(0.010), p(0.033), p(0.036), fill=INK)
-        ell(d, ex + sgn * p(0.023), eye_y - p(0.012), p(0.015), p(0.015), fill=WHITE)
-    d.line([(cx - p(0.146), eye_y - p(0.082)), (cx - p(0.036), eye_y - p(0.050))],
-           fill=INK, width=int(p(0.019)))
-    d.line([(cx + p(0.146), eye_y - p(0.082)), (cx + p(0.036), eye_y - p(0.050))],
-           fill=INK, width=int(p(0.019)))
-    d.arc([cx - p(0.048), eye_y + p(0.062), cx + p(0.048), eye_y + p(0.130)],
-          200, 345, fill=INK, width=int(p(0.016)))
+        ell(d, cx + sgn * p(0.205), head_cy + p(0.055), p(0.070), p(0.062),
+            fill=SKY, outline=INK, width=ow)
+    ell(d, cx, head_cy, head_rx, head_ry, fill=SKY, outline=INK, width=ow)
+    # Forehead highlight.
+    ell(d, cx - p(0.075), head_cy - p(0.100), p(0.085), p(0.048), fill=SKY_LIGHT)
 
-    # --------------------------------------------------------- bandolier ----
-    belt_y = by0 + p(0.268)
-    d.line([(bx0 - p(0.008), belt_y - p(0.042)), (bx1 + p(0.008), belt_y + p(0.064))],
-           fill=AMBER_DARK, width=int(p(0.054)))
-    for i in range(6):
-        t = i / 5.0
-        ax = bx0 + (bx1 - bx0) * t
-        ay = belt_y - p(0.042) + p(0.106) * t
-        d.rounded_rectangle([ax - p(0.019), ay - p(0.033), ax + p(0.019), ay + p(0.033)],
-                            radius=p(0.010), fill=AMBER, outline=AMBER_DARK, width=int(ow * 0.6))
-        ell(d, ax, ay - p(0.033), p(0.019), p(0.011), fill=(254, 215, 170))
+    # ------------------------------------------------------------- face -----
+    eye_y = head_cy + p(0.005)
 
-    # ----------------------------------------------------------- minigun ----
-    gx, gy = p(0.398), p(0.648)
-    d.rounded_rectangle([gx - p(0.042), gy - p(0.054), gx + p(0.178), gy + p(0.054)],
-                        radius=p(0.027), fill=STEEL_DARK, outline=INK, width=ow)
-    for k, off in enumerate((-0.036, 0.0, 0.036)):
-        d.rounded_rectangle([gx - p(0.282), gy + p(off) - p(0.017),
-                             gx - p(0.030), gy + p(off) + p(0.017)],
-                            radius=p(0.015),
-                            fill=STEEL_LIGHT if k == 1 else STEEL,
-                            outline=INK, width=int(ow * 0.7))
-    ell(d, gx - p(0.030), gy, p(0.031), p(0.060), fill=STEEL, outline=INK, width=int(ow * 0.7))
-    ell(d, gx + p(0.152), gy + p(0.046), p(0.064), p(0.064), fill=AMBER, outline=INK, width=ow)
-    ell(d, gx + p(0.152), gy + p(0.046), p(0.027), p(0.027), fill=AMBER_DARK)
-    ell(d, gx + p(0.112), gy - p(0.030), p(0.017), p(0.017), fill=VIOLET)
-
-    # -------------------------------------------------------------- arms ----
-    d.line([(bx0 + p(0.036), by0 + p(0.318)), (gx + p(0.021), gy - p(0.021))],
-           fill=SKY_DEEP, width=int(p(0.058)))
-    ell(d, gx + p(0.021), gy - p(0.021), p(0.041), p(0.041),
-        fill=SKY_BRIGHT, outline=INK, width=int(ow * 0.8))
-    d.line([(bx1 - p(0.036), by0 + p(0.302)), (sx - p(0.097), sy + p(0.011))],
-           fill=SKY_DEEP, width=int(p(0.058)))
-    ell(d, sx - p(0.097), sy + p(0.011), p(0.041), p(0.041),
-        fill=SKY_BRIGHT, outline=INK, width=int(ow * 0.8))
-
-    # ------------------------------------------------------------- boots ----
+    # Half-lidded eyes. This is the whole joke: the cat is not impressed.
     for sgn in (-1, 1):
-        bx = cx + sgn * p(0.114)
-        d.rounded_rectangle([bx - p(0.071), by1 - p(0.012), bx + p(0.071), by1 + p(0.072)],
-                            radius=p(0.035), fill=STEEL_DARK, outline=INK, width=ow)
+        ex = cx + sgn * p(0.093)
+        # Eye white, mostly covered by the lid.
+        ell(d, ex, eye_y, p(0.056), p(0.048), fill=WHITE, outline=INK, width=int(ow * 0.8))
+        # Pupil, small and low - a bored gaze.
+        ell(d, ex, eye_y + p(0.012), p(0.030), p(0.032), fill=INK)
+        ell(d, ex + sgn * p(0.012), eye_y + p(0.002), p(0.010), p(0.010), fill=WHITE)
+        # The lid: a filled cap over the top half, with a heavy lash line.
+        d.chord([ex - p(0.058), eye_y - p(0.052), ex + p(0.058), eye_y + p(0.046)],
+                180, 360, fill=SKY)
+        d.line([(ex - p(0.058), eye_y - p(0.004)), (ex + p(0.058), eye_y - p(0.004))],
+               fill=INK, width=int(p(0.013)))
+
+    # Nose and a flat, unbothered mouth.
+    nose_y = eye_y + p(0.078)
+    d.polygon([(cx - p(0.026), nose_y), (cx + p(0.026), nose_y), (cx, nose_y + p(0.028))],
+              fill=PINK, outline=INK, width=int(ow * 0.6))
+    d.line([(cx, nose_y + p(0.028)), (cx, nose_y + p(0.050))], fill=INK, width=int(p(0.010)))
+    # Two small curves: a cat mouth, not a smile.
+    d.arc([cx - p(0.058), nose_y + p(0.020), cx, nose_y + p(0.078)], 0, 110,
+          fill=INK, width=int(p(0.011)))
+    d.arc([cx, nose_y + p(0.020), cx + p(0.058), nose_y + p(0.078)], 70, 180,
+          fill=INK, width=int(p(0.011)))
+
+    # Whiskers, kept short so they survive being shrunk.
+    for sgn in (-1, 1):
+        for dy, dr in ((-0.018, -0.020), (0.010, 0.004), (0.036, 0.030)):
+            d.line([(cx + sgn * p(0.140), nose_y + p(dy)),
+                    (cx + sgn * p(0.248), nose_y + p(dy + dr))],
+                   fill=INK, width=int(p(0.009)))
+
+    # ------------------------------------------------------------- arms -----
+    # Stubby arms held out, each with a pistol. They sit low and relaxed.
+    for sgn in (-1, 1):
+        sx_ = cx + sgn * p(0.215)
+        sy_ = body_cy - p(0.020)
+        ell(d, sx_, sy_, p(0.072), p(0.062), fill=SKY, outline=INK, width=ow)
+        px_ = cx + sgn * p(0.300)
+        py_ = sy_ + p(0.055)
+
+        # Gun first, paw second: the paw has to sit on top of the grip or the
+        # cat looks like it is standing next to two floating pistols.
+        pistol(d, px_ + sgn * p(0.010), py_ - p(0.015), sgn, 1.0, int(ow * 0.8))
+
+        ell(d, px_, py_, p(0.058), p(0.052), fill=SKY_LIGHT, outline=INK, width=ow)
+        for k in (-1, 0, 1):
+            d.line([(px_ + k * p(0.020), py_ + p(0.018)),
+                    (px_ + k * p(0.020), py_ + p(0.042))],
+                   fill=INK, width=int(p(0.007)))
+
+    # ------------------------------------------------------- bandolier ------
+    # A strap of shells across the chest, because one pair of guns is restraint.
+    belt_y = body_cy + p(0.010)
+    d.line([(cx - p(0.215), belt_y - p(0.070)), (cx + p(0.205), belt_y + p(0.075))],
+           fill=AMBER_DARK, width=int(p(0.050)))
+    for i in range(5):
+        t = i / 4.0
+        ax = cx - p(0.190) + p(0.370) * t
+        ay = belt_y - p(0.062) + p(0.130) * t
+        d.rounded_rectangle([ax - p(0.018), ay - p(0.030), ax + p(0.018), ay + p(0.030)],
+                            radius=p(0.009), fill=AMBER, outline=AMBER_DARK, width=int(ow * 0.6))
+        ell(d, ax, ay - p(0.030), p(0.018), p(0.010), fill=(254, 215, 170))
+
+    # ------------------------------------------------------------ feet ------
+    for sgn in (-1, 1):
+        ell(d, cx + sgn * p(0.105), p(0.812), p(0.078), p(0.042),
+            fill=SKY_LIGHT, outline=INK, width=ow)
+
+    # A single violet glint on the collar tag: the one place violet appears,
+    # matching the interface, where violet means "this thing is active".
+    tag_y = head_cy + p(0.205)
+    d.line([(cx - p(0.150), tag_y - p(0.012)), (cx + p(0.150), tag_y + p(0.006))],
+           fill=ROSE, width=int(p(0.030)))
+    ell(d, cx + p(0.010), tag_y + p(0.034), p(0.040), p(0.040),
+        fill=VIOLET, outline=INK, width=int(ow * 0.7))
+    ell(d, cx - p(0.002), tag_y + p(0.024), p(0.013), p(0.013), fill=(221, 214, 254))
 
     return img
 

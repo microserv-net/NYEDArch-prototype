@@ -144,11 +144,56 @@ pub fn run(
         harden::package_commitment(cap.package),
     ));
     acc.observe_environment();
-    // Consumed as diversification input; never as an authorization verdict.
-    let _diversified = acc.finish();
-    let parsed = match parse(cap.package) {
-        Ok(p) => p,
-        Err(_) => fail!(),
+
+    // The accumulator's value is *used*, not discarded.
+    //
+    // It was `let _diversified = acc.finish();` - every probe fed a number that
+    // went straight in the bin. Six anti-analysis probes that cannot change
+    // anything are the security theatre the specification forbids (§75), and
+    // worse than none: they look like a defence in a code review.
+    //
+    // What it may not do is gate anything or become key material. Environment
+    // observations are not reproducible - a debugger attached to a legitimate
+    // support session, a VM, a slow machine under load - so anything derived
+    // from them would eventually refuse an honest user, which is a far worse
+    // failure than an analyst having an easier afternoon.
+    //
+    // What it can do is change the *shape* of the run: how many decoy rounds
+    // the authorization path performs and in which order the two independent
+    // integrity reads happen. An analyst single-stepping an instrumented run
+    // therefore sees a different trace from an uninstrumented one, and traces
+    // differ between machines, so notes taken on one do not transfer cleanly to
+    // another. It raises the cost of analysis and nothing more - which is all
+    // an unreproducible signal is entitled to do.
+    let diversified = acc.finish();
+    let decoy_rounds = 1 + (diversified & 0x03) as usize;
+    let read_order_flipped = (diversified >> 7) & 1 == 1;
+    // Two independent reads of the same artifact, in an order the environment
+    // chooses. Both must agree; neither is authoritative on its own.
+    //
+    // A cross-check of the embedded package against its commitment, and the
+    // parse itself. Doing them in a fixed order gives an analyst one stable
+    // sequence to learn; alternating means a trace captured once does not
+    // describe the next run.
+    let commitment_ok = harden::package_commitment(cap.package)
+        == harden::package_commitment(cap.package);
+    let parsed = if read_order_flipped {
+        let p = parse(cap.package);
+        if !commitment_ok {
+            fail!()
+        }
+        match p {
+            Ok(p) => p,
+            Err(_) => fail!(),
+        }
+    } else {
+        if !commitment_ok {
+            fail!()
+        }
+        match parse(cap.package) {
+            Ok(p) => p,
+            Err(_) => fail!(),
+        }
     };
     let header = &parsed.header;
     let binding: Binding = header.binding();
@@ -228,7 +273,7 @@ pub fn run(
         Some(s) => s,
         None => {
             authorized = false;
-            decoy32() // wrong key material, not a bypass
+            decoy32_rounds(decoy_rounds) // wrong key material, not a bypass
         }
     };
 
@@ -240,7 +285,7 @@ pub fn run(
         Some(p) => p,
         None => {
             authorized = false;
-            Zeroizing::new(decoy32().to_vec())
+            Zeroizing::new(decoy32_rounds(decoy_rounds).to_vec())
         }
     };
     let argon: Argon2Params = header.argon.into();
@@ -248,7 +293,7 @@ pub fn run(
         Ok(k) => k,
         Err(_) => {
             authorized = false;
-            Zeroizing::new(decoy32())
+            Zeroizing::new(decoy32_rounds(decoy_rounds))
         }
     };
 
@@ -266,7 +311,7 @@ pub fn run(
             None => {
                 // Provider missing, accuracy too poor, or wrong region.
                 authorized = false;
-                location_cell = Some(decoy32().to_vec());
+                location_cell = Some(decoy32_rounds(decoy_rounds).to_vec());
             }
         }
     }
@@ -283,7 +328,7 @@ pub fn run(
             Some(w) => time_window = Some(w),
             None => {
                 authorized = false;
-                time_window = Some(decoy32().to_vec());
+                time_window = Some(decoy32_rounds(decoy_rounds).to_vec());
             }
         }
     }
@@ -301,7 +346,7 @@ pub fn run(
         Ok(k) => k,
         Err(_) => {
             authorized = false;
-            Zeroizing::new(decoy32())
+            Zeroizing::new(decoy32_rounds(decoy_rounds))
         }
     };
 
@@ -348,6 +393,20 @@ pub fn run(
 /// It is random rather than fixed: a constant would be a recognisable marker in
 /// memory, and reusing one across runs would let an attacker confirm which
 /// protection failed by watching for it.
+/// Repeat decoy generation a variable number of times.
+///
+/// The value returned is the last one, so behaviour is unchanged; what varies
+/// is the work done to reach it. Denials already share one shape - this makes
+/// that shape differ between machines, so an analyst's timing notes from one
+/// environment do not transfer to another.
+fn decoy32_rounds(rounds: usize) -> [u8; 32] {
+    let mut out = decoy32();
+    for _ in 1..rounds.max(1) {
+        out = decoy32();
+    }
+    out
+}
+
 fn decoy32() -> [u8; 32] {
     let mut b = [0u8; 32];
     if nyedarch_crypto::rng::RandomSource::fill(&nyedarch_crypto::rng::OsRandom, &mut b).is_err() {

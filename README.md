@@ -153,7 +153,7 @@ Every platform path now runs on a real runner, not just a compiler:
 | `docs/ANTI_RE_ANALYSIS.md` | Anti-tamper and anti-analysis, with limits stated |
 | `docs/PROTOTYPE_I_COMPLETE.md` | What was delivered, what was deliberately left out, and the weaknesses carried forward |
 | `docs/CI_TESTING_METHOD.md` | How platform code was verified on hosted runners without publishing source |
-| `docs/decisions/` | 12 architecture decision records |
+| `docs/decisions/` | 13 architecture decision records |
 
 ## Known limitations
 

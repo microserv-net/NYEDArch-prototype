@@ -154,6 +154,34 @@ regions of its own; and this is a Linux-specific view — the other platforms fa
 back to the environment-marker probe. It contributes observations, never a
 verdict.
 
+### 5b. The tamper accumulator was being discarded — FIXED
+
+Found by audit, and worth recording plainly because it is the failure this
+document is most at risk of: the accumulator was computed from six probes and
+then thrown away (`let _diversified = acc.finish();`).
+
+Every anti-analysis probe fed a number that went straight in the bin. That is
+security theatre (§75), and **worse than having none**: in a review it reads as
+a defence, so nobody looks again.
+
+**What it does now.** It changes the *shape* of a run: how many decoy rounds the
+authorization path performs, and the order of two independent integrity reads.
+An analyst single-stepping an instrumented run sees a different trace from an
+uninstrumented one, and traces differ between machines, so notes taken on one do
+not transfer cleanly to another.
+
+**What it must never do.** Gate anything, or become key material. Environment
+observations are not reproducible — a debugger attached during a support call, a
+virtual machine, a loaded host — so anything derived from them would eventually
+refuse an honest user. That is a far worse failure than an analyst having an
+easier afternoon. Two tests enforce this: one asserts the value is bound and
+reaches the run's shape, the other that `if diversified` and equality
+comparisons against it never appear.
+
+**Honest scope.** This raises the cost of analysis. It stops nobody. The
+confidentiality boundary is the composed key, as everywhere else in this
+document.
+
 ## 6. Memory hygiene limits
 
 `Zeroizing` clears buffers on drop and minimises secret lifetime. It does **not**
