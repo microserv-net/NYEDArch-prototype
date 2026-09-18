@@ -74,6 +74,56 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  desktop:
+    name: desktop client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui
+
+      # The desktop client is a separate cargo workspace, so `cargo build
+      # --workspace` at the repository root never touched it. Toolchain warnings
+      # accumulated there unseen for weeks, and a compile break would have
+      # reached a release before anyone noticed.
+      - name: System libraries the client links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev
+
+      - name: Build the desktop client
+        working-directory: gui/nyedarch-gui
+        shell: bash
+        run: |
+          set +e
+          cargo build 2>&1 | tee /tmp/gui.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            grep -E "^(error|warning)" -A4 /tmp/gui.txt | head -40 | while IFS= read -r line; do
+              echo "::error::gui: ${line}"
+            done
+            exit "$code"
+          fi
+
+      # Warnings are failures here for the same reason they are in the
+      # workspace: the client is shipped, and a warning is a defect nobody has
+      # looked at yet.
+      - name: The client must build clean
+        shell: bash
+        run: |
+          n=$(grep -c '^warning' /tmp/gui.txt || true)
+          if [ "$n" != "0" ]; then
+            echo "::error::the desktop client produced $n warning(s)"
+            grep -A4 '^warning' /tmp/gui.txt | head -40 | while IFS= read -r line; do
+              echo "::error::gui: ${line}"
+            done
+            exit 1
+          fi
+
   capsule:
     name: end-to-end capsule (${{ matrix.os }})
     strategy:
