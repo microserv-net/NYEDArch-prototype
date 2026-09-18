@@ -2143,6 +2143,33 @@ impl App {
 
 // ------------------------------------------------------------------- app ----
 
+/// What the user meant by dropping this.
+///
+/// Dropping is the fastest way into the product, and it used to have exactly
+/// one interpretation: everything was treated as a capsule to run, so dropping
+/// a folder you wanted to protect jumped to the Run step and told you it was
+/// not a capsule. The gesture is the same; the intent is not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DropIntent {
+    /// A `.nyarch` file: the user wants to open it.
+    RunCapsule,
+    /// Anything else: the user wants to protect it.
+    ProtectSource,
+}
+
+/// Decide from the path alone, so the routing is testable without a window.
+pub fn drop_intent(path: &std::path::Path) -> DropIntent {
+    let is_capsule = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("nyarch"))
+        .unwrap_or(false);
+    if is_capsule {
+        DropIntent::RunCapsule
+    } else {
+        DropIntent::ProtectSource
+    }
+}
+
 impl App {
     fn handle_drops(&mut self, ctx: &egui::Context, now: f64) {
         let dropped: Vec<std::path::PathBuf> =
@@ -2150,21 +2177,40 @@ impl App {
         if dropped.is_empty() {
             return;
         }
-        self.goto(Step::Run, now);
         for path in dropped {
-            match nyedarch_core::launch::validate(&path) {
-                Ok(()) => {
-                    self.run_status.clear();
-                    self.run_ok = false;
-                    self.toast(now, "Capsule ready", t::SKY);
-                    self.say(now, format!("Loaded {}", path.display()));
-                    self.dropped_capsule = Some(path);
+            match drop_intent(&path) {
+                DropIntent::RunCapsule => {
+                    self.goto(Step::Run, now);
+                    match nyedarch_core::launch::validate(&path) {
+                        Ok(()) => {
+                            self.run_status.clear();
+                            self.run_ok = false;
+                            self.toast(now, "Capsule ready", t::SKY);
+                            self.say(now, format!("Loaded {}", path.display()));
+                            self.dropped_capsule = Some(path);
+                        }
+                        Err(e) => {
+                            self.dropped_capsule = None;
+                            self.run_ok = false;
+                            self.run_status = format!("Cannot run that capsule: {e}");
+                            self.toast(now, "Capsule refused", t::ROSE);
+                        }
+                    }
                 }
-                Err(e) => {
-                    self.dropped_capsule = None;
-                    self.run_ok = false;
-                    self.run_status = format!("Cannot run that file: {e}");
-                    self.toast(now, "Not a capsule", t::ROSE);
+                DropIntent::ProtectSource => {
+                    // A folder or an ordinary file is something to protect, not
+                    // something to open. Sending it to Run and calling it "not a
+                    // capsule" answered a question the user had not asked.
+                    self.goto(Step::Source, now);
+                    self.source_path = path.to_string_lossy().to_string();
+                    self.toast(now, "Ready to protect", t::SKY);
+                    self.say(
+                        now,
+                        format!(
+                            "Protecting {} - drop a .nyarch capsule instead to open one",
+                            path.display()
+                        ),
+                    );
                 }
             }
         }
@@ -2368,4 +2414,57 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("NYEDArch", opts, Box::new(|_cc| Box::<App>::default()))
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::{drop_intent, DropIntent};
+    use std::path::Path;
+
+    /// A capsule is opened; everything else is protected.
+    ///
+    /// Every drop used to be treated as a capsule, so dropping a folder you
+    /// wanted to protect landed on the Run step and was told it was not a
+    /// capsule - an answer to a question the user had not asked.
+    #[test]
+    fn capsules_are_opened_and_everything_else_is_protected() {
+        for capsule in [
+            "/tmp/reports.nyarch",
+            "/tmp/Reports.NYARCH",
+            "C:\\Users\\me\\Desktop\\payroll.nyarch",
+        ] {
+            assert_eq!(
+                drop_intent(Path::new(capsule)),
+                DropIntent::RunCapsule,
+                "{capsule} should open"
+            );
+        }
+
+        for source in [
+            "/tmp/reports",             // a folder
+            "/tmp/report.pdf",
+            "/tmp/archive.zip",
+            "/tmp/notes.txt",
+            "/tmp/nyarch",              // a folder merely named like one
+            "/tmp/capsule.nyarch.bak",  // not the capsule extension
+        ] {
+            assert_eq!(
+                drop_intent(Path::new(source)),
+                DropIntent::ProtectSource,
+                "{source} should be protected, not opened"
+            );
+        }
+    }
+
+    /// The extension match is case-insensitive but exact.
+    ///
+    /// A file merely containing "nyarch" in its name is not a capsule, and
+    /// treating it as one would send the user to a refusal instead of the step
+    /// they wanted.
+    #[test]
+    fn only_the_real_extension_counts() {
+        assert_eq!(drop_intent(Path::new("/x/a.nyarchive")), DropIntent::ProtectSource);
+        assert_eq!(drop_intent(Path::new("/x/nyarch.txt")), DropIntent::ProtectSource);
+        assert_eq!(drop_intent(Path::new("/x/a.NyArch")), DropIntent::RunCapsule);
+    }
 }

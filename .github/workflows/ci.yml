@@ -112,6 +112,12 @@ jobs:
       # Warnings are failures here for the same reason they are in the
       # workspace: the client is shipped, and a warning is a defect nobody has
       # looked at yet.
+      # The client has tests of its own now - drop routing, and whatever
+      # follows. Building without running them proves only that it compiles.
+      - name: Test the desktop client
+        working-directory: gui/nyedarch-gui
+        run: cargo test
+
       - name: The client must build clean
         shell: bash
         run: |
