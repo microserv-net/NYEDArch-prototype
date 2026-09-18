@@ -148,6 +148,19 @@ It is 30 px, shares the rail's surface colour, and has **no rule beneath it**. A
 hairline there cut the window in two and left a visible seam; without it the top
 of the window reads as one continuous plane with the content floating on it.
 
+## What is verified, and what is not
+
+Screenshots in `docs/ui` come from the running client under a headless X server.
+That catches layout, colour and contrast, and it caught several things review
+did not: rings too faint to invite a click, text clipped out of a card, a label
+repeated under the capsule.
+
+It does **not** exercise pointer behaviour reliably. A synthetic pointer does not
+always produce the motion events the toolkit reacts to, so the ring hover label
+and the ring click are covered by their logic and by a compile, not by a picture.
+They are listed here rather than left implied: a screenshot proves what it shows,
+and nothing more.
+
 ## Accessibility notes
 
 - Meaning is never carried by colour alone: engaged protections also show a
