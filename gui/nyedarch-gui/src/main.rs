@@ -1887,7 +1887,8 @@ impl App {
         w::section_title(
             ui,
             "Run a capsule",
-            "Drop a .nyarch capsule anywhere on this window, or open one from the Capsule menu.",
+            "Drop a capsule anywhere on this window to open it, or drop a folder to protect it instead. \
+             You can also open one from the Capsule menu.",
         );
 
         let name = self

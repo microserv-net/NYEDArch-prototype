@@ -666,7 +666,9 @@ pub fn drop_zone(ui: &mut Ui, height: f32, armed: bool, filled: Option<&str>, ti
 
     let (label, colour) = match filled {
         Some(name) => (name.to_string(), t::INK),
-        None => ("Drop a .nyarch capsule here".to_string(), t::INK_SOFT),
+        // Both intents, stated. A window that accepts two kinds of drop and
+        // advertises one teaches people the other will fail.
+        None => ("Drop a capsule to open it".to_string(), t::INK_SOFT),
     };
     ui.painter().text(
         pos2(rect.center().x, rect.center().y + 40.0),
@@ -675,6 +677,15 @@ pub fn drop_zone(ui: &mut Ui, height: f32, armed: bool, filled: Option<&str>, ti
         t::font(t::BODY),
         colour,
     );
+    if filled.is_none() {
+        ui.painter().text(
+            pos2(rect.center().x, rect.center().y + 62.0),
+            Align2::CENTER_CENTER,
+            "or drop a folder to protect it",
+            t::font(t::MICRO),
+            t::INK_MUTED,
+        );
+    }
     rect
 }
 
