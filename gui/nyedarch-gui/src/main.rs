@@ -992,94 +992,64 @@ impl App {
 // ------------------------------------------------------------------- rail ---
 
 impl App {
+    /// Header and stage spine.
+    ///
+    /// This replaced a 236 px sidebar of numbered steps. A vertical list of
+    /// stages is what every settings window looks like, and it spent a fifth of
+    /// the screen telling you where you were instead of showing you anything.
+    ///
+    /// The spine runs across the top, the capsule sits beneath it as a standing
+    /// object, and the full width is left for the work. The light along the
+    /// spine travels in the same direction as the perimeter pulse, so the window
+    /// has one direction of travel rather than two competing ones.
     fn rail(&mut self, ctx: &egui::Context, now: f64) {
-        egui::SidePanel::left("rail")
-            .exact_width(236.0)
-            .resizable(false)
-            .frame(egui::Frame::none().fill(t::RAIL).inner_margin(egui::Margin {
-                left: 12.0,
-                right: 12.0,
-                top: 16.0,
-                bottom: 12.0,
-            }))
+        egui::TopBottomPanel::top("spine")
+            .exact_height(132.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(t::RAIL)
+                    .inner_margin(egui::Margin::symmetric(22.0, 12.0)),
+            )
             .show(ctx, |ui| {
-                // Wordmark with the aperture.
-                let (logo_rect, _) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
-                let open = self.active_protections() as f32 / 4.0;
-                w::aperture(ui.painter(),
-                    pos2(logo_rect.left() + 23.0, logo_rect.center().y),
-                    44.0,
-                    now,
-                    1.0 - open * 0.8,
-                    self.building,
-                );
-                ui.painter().text(
-                    pos2(logo_rect.left() + 52.0, logo_rect.center().y - 9.0),
-                    Align2::LEFT_CENTER,
-                    "NYEDArch",
-                    t::font(19.0),
-                    t::INK,
-                );
-                ui.painter().text(
-                    pos2(logo_rect.left() + 52.0, logo_rect.center().y + 10.0),
-                    Align2::LEFT_CENTER,
-                    "Not Your Everyday Archive",
-                    t::font(t::MICRO),
-                    t::INK_MUTED,
-                );
+                ui.horizontal(|ui| {
+                    let open = self.active_protections() as f32 / 4.0;
+                    let (mark, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+                    w::aperture(
+                        ui.painter(),
+                        mark.center(),
+                        44.0,
+                        now,
+                        1.0 - open * 0.8,
+                        self.building,
+                    );
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new("NYEDArch").size(19.0).color(t::INK));
+                        ui.label(
+                            egui::RichText::new("Not Your Everyday Archive")
+                                .size(t::MICRO)
+                                .color(t::INK_MUTED),
+                        );
+                    });
+                });
 
-                ui.add_space(12.0);
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-                ui.painter().rect_filled(r, Rounding::ZERO, t::LINE);
-                ui.add_space(10.0);
+                ui.add_space(4.0);
 
-                // Sliding active indicator, painted before the items.
-                let first_y = ui.cursor().top();
-                let item_h = 50.0 + ui.spacing().item_spacing.y;
-                let target_y = first_y + self.step.index() as f32 * item_h;
-                let y = ui
-                    .ctx()
-                    .animate_value_with_time(egui::Id::new("rail_ind"), target_y, 0.22);
-                let ind = Rect::from_min_size(pos2(ui.min_rect().left() - 8.0, y + 9.0), vec2(3.0, 32.0));
-                ui.painter().rect_filled(ind, Rounding::same(2.0), t::SKY);
-                w::glow(ui.painter(), ind.center(), 20.0, t::SKY, 0.4);
-
-                let mut clicked = None;
-                for (i, s) in Step::ALL.iter().enumerate() {
-                    let done = self.step_done(*s) && *s != self.step;
-                    if w::nav_item(ui, i, s.label(), s.hint(), *s == self.step, done).clicked() {
-                        clicked = Some(*s);
+                let labels: Vec<(&str, &str)> =
+                    Step::ALL.iter().map(|s| (s.label(), s.hint())).collect();
+                let done: Vec<bool> = Step::ALL
+                    .iter()
+                    .map(|s| self.step_done(*s) && *s != self.step)
+                    .collect();
+                if let Some(i) = w::spine(ui, &labels, self.step.index(), &done, now) {
+                    if let Some(s) = Step::ALL.get(i) {
+                        self.goto(*s, now);
                     }
                 }
-                if let Some(s) = clicked {
-                    self.goto(s, now);
-                }
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
-                    ui.add_space(2.0);
-                    w::vault_core(
-                        ui,
-                        208.0,
-                        [
-                            true, // machine: mandatory, always engaged
-                            self.passphrase_acceptable(),
-                            self.protections.location,
-                            self.protections.time,
-                        ],
-                        self.build_progress,
-                        self.building,
-                        now,
-                    );
-                });
             });
     }
-}
 
-// ------------------------------------------------------------------ views ---
-
-impl App {
     fn view_source(&mut self, ui: &mut egui::Ui, now: f64) {
         w::section_title(
             ui,
@@ -2322,9 +2292,51 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 let full = ui.max_rect();
 
+                // The capsule stands beside the work, always.
+                //
+                // It used to live at the bottom of a sidebar, below six
+                // navigation items - the thing being built, filed under
+                // furniture. Here it is a standing object the whole session
+                // happens next to, and it locks shut as the work proceeds.
+                let stage_w = 268.0_f32.min(full.width() * 0.30);
+                let stage = Rect::from_min_size(
+                    full.min + vec2(6.0, 10.0),
+                    vec2(stage_w, full.height() - 20.0),
+                );
+                let mut stage_ui =
+                    ui.child_ui(stage, egui::Layout::top_down(egui::Align::Center));
+                stage_ui.add_space((stage.height() * 0.24).min(120.0));
+                w::vault_core(
+                    &mut stage_ui,
+                    stage_w.min(236.0),
+                    [
+                        true, // machine: mandatory, always engaged
+                        self.passphrase_acceptable(),
+                        self.protections.location,
+                        self.protections.time,
+                    ],
+                    self.build_progress,
+                    self.building,
+                    now,
+                );
+
+                // A hairline between the object and the work, so the eye knows
+                // they are two things rather than one crowded column.
+                ui.painter().line_segment(
+                    [
+                        pos2(stage.right() + 14.0, full.top() + 18.0),
+                        pos2(stage.right() + 14.0, full.bottom() - 18.0),
+                    ],
+                    Stroke::new(1.0_f32, t::LINE),
+                );
+
                 let since = (now - self.step_changed_at) as f32;
                 let e = t::ease_out_cubic((since / 0.30).clamp(0.0, 1.0));
-                let content = full.shrink2(vec2(30.0, 22.0)).translate(vec2(0.0, (1.0 - e) * 16.0));
+                let content = Rect::from_min_max(
+                    pos2(stage.right() + 34.0, full.top() + 22.0),
+                    pos2(full.right() - 30.0, full.bottom() - 22.0),
+                )
+                .translate(vec2(0.0, (1.0 - e) * 16.0));
                 let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::Min));
                 child.set_opacity(e);
 

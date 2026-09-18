@@ -427,75 +427,6 @@ pub fn switch(ui: &mut Ui, id_salt: &str, on: &mut bool, locked: bool) -> Respon
 
 // ------------------------------------------------------------- navigation ---
 
-/// Rail entry. The sliding indicator is painted by the caller.
-pub fn nav_item(
-    ui: &mut Ui,
-    index: usize,
-    label: &str,
-    hint: &str,
-    active: bool,
-    done: bool,
-) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
-    let hov = ui
-        .ctx()
-        .animate_bool_with_time(ui.id().with(("nav", index)), resp.hovered(), 0.12);
-
-    if active {
-        ui.painter().rect_filled(
-            rect.shrink2(vec2(4.0, 3.0)),
-            Rounding::same(t::R_CONTROL),
-            t::SKY_WASH,
-        );
-    } else if hov > 0.01 {
-        ui.painter().rect_filled(
-            rect.shrink2(vec2(4.0, 3.0)),
-            Rounding::same(t::R_CONTROL),
-            t::alpha(t::SUNKEN, 0.9 * hov),
-        );
-    }
-
-    let mc = pos2(rect.left() + 26.0, rect.center().y);
-    if done {
-        ui.painter().circle_filled(mc, 9.0, t::SKY);
-        let s = 4.4;
-        for seg in [
-            [pos2(mc.x - s * 0.75, mc.y + 0.2), pos2(mc.x - s * 0.1, mc.y + s * 0.62)],
-            [pos2(mc.x - s * 0.1, mc.y + s * 0.62), pos2(mc.x + s * 0.85, mc.y - s * 0.6)],
-        ] {
-            ui.painter().line_segment(seg, Stroke::new(2.0_f32, Color32::WHITE));
-        }
-    } else if active {
-        ui.painter().circle_stroke(mc, 9.0, Stroke::new(2.0_f32, t::SKY));
-        ui.painter().circle_filled(mc, 3.6, t::SKY);
-    } else {
-        ui.painter().circle_stroke(mc, 9.0, Stroke::new(1.3_f32, t::LINE_STRONG));
-        ui.painter().text(
-            mc,
-            Align2::CENTER_CENTER,
-            format!("{}", index + 1),
-            t::font(t::MICRO),
-            t::INK_MUTED,
-        );
-    }
-
-    ui.painter().text(
-        pos2(rect.left() + 48.0, rect.center().y - 8.0),
-        Align2::LEFT_CENTER,
-        label,
-        t::font(t::BODY),
-        if active { t::SKY_DEEP } else { t::mix(t::INK_SOFT, t::INK, hov * 0.5) },
-    );
-    ui.painter().text(
-        pos2(rect.left() + 48.0, rect.center().y + 9.0),
-        Align2::LEFT_CENTER,
-        hint,
-        t::font(t::MICRO),
-        t::INK_MUTED,
-    );
-    resp
-}
-
 // ---------------------------------------------------------------- buttons ---
 
 pub fn primary_button(ui: &mut Ui, id_salt: &str, label: &str, enabled: bool, width: f32) -> Response {
@@ -1121,4 +1052,122 @@ pub fn vault_core(
         t::font(t::MICRO),
         if p >= 1.0 { t::SKY_DEEP } else { t::INK_MUTED },
     );
+}
+
+// ----------------------------------------------------------------- spine ---
+
+/// The stage spine: a horizontal chain the capsule travels along.
+///
+/// Replaces a vertical list of steps down the left edge. A sidebar of numbered
+/// items is what every settings window looks like, and it spends a fifth of the
+/// screen saying where you are rather than showing you anything.
+///
+/// A spine reads as progress through a process, which is what this is, and it
+/// frees the whole width beneath it. A light runs along the completed section
+/// in the same direction as the perimeter pulse, so the window has one
+/// direction of travel rather than two.
+///
+/// Returns the stage the user clicked, if any.
+pub fn spine(
+    ui: &mut Ui,
+    labels: &[(&str, &str)],
+    current: usize,
+    done: &[bool],
+    time: f64,
+) -> Option<usize> {
+    let h = 64.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let n = labels.len().max(1);
+    let pad = 28.0;
+    let usable = rect.width() - pad * 2.0;
+    let step_w = usable / (n as f32 - 1.0).max(1.0);
+    let y = rect.top() + 26.0;
+    let node_at = |i: usize| pos2(rect.left() + pad + step_w * i as f32, y);
+
+    // The rail the nodes sit on.
+    ui.painter().line_segment(
+        [pos2(node_at(0).x, y), pos2(node_at(n - 1).x, y)],
+        Stroke::new(2.0_f32, t::alpha(t::LINE_STRONG, 0.9)),
+    );
+
+    // Completed section, drawn brighter, with a travelling spark.
+    let reached = ui
+        .ctx()
+        .animate_value_with_time(ui.id().with("spine_pos"), current as f32, 0.28);
+    let head = node_at(0).x + step_w * reached;
+    ui.painter().line_segment(
+        [pos2(node_at(0).x, y), pos2(head, y)],
+        Stroke::new(2.6_f32, t::SKY),
+    );
+    let spark = node_at(0).x + (head - node_at(0).x) * (((time * 0.55) % 1.0) as f32);
+    if spark > node_at(0).x + 2.0 {
+        glow(ui.painter(), pos2(spark, y), 9.0, t::SKY_BRIGHT, 0.5);
+    }
+
+    let mut clicked = None;
+    for (i, (label, hint)) in labels.iter().enumerate() {
+        let c = node_at(i);
+        let active = i == current;
+        let complete = done.get(i).copied().unwrap_or(false) && !active;
+
+        let hit = Rect::from_center_size(c, vec2(step_w.min(150.0), h));
+        let resp = ui.interact(hit, ui.id().with(("spine", i)), Sense::click());
+        if resp.clicked() {
+            clicked = Some(i);
+        }
+        let hov = ui
+            .ctx()
+            .animate_bool_with_time(ui.id().with(("spine_h", i)), resp.hovered(), 0.12);
+
+        let r = 11.0 + 3.0 * (active as u8 as f32) + 1.5 * hov;
+        if active {
+            glow(ui.painter(), c, 22.0, t::SKY, 0.45);
+        }
+        ui.painter().circle_filled(c, r, t::SURFACE);
+        ui.painter().circle_stroke(
+            c,
+            r,
+            Stroke::new(
+                if active { 2.6_f32 } else { 1.6_f32 },
+                if active || complete { t::SKY } else { t::mix(t::LINE_STRONG, t::SKY, hov) },
+            ),
+        );
+        if complete {
+            let s = 4.6;
+            for seg in [
+                [pos2(c.x - s * 0.75, c.y + 0.2), pos2(c.x - s * 0.1, c.y + s * 0.62)],
+                [pos2(c.x - s * 0.1, c.y + s * 0.62), pos2(c.x + s * 0.85, c.y - s * 0.6)],
+            ] {
+                ui.painter().line_segment(seg, Stroke::new(2.2_f32, t::SKY));
+            }
+        } else if active {
+            ui.painter().circle_filled(c, 4.2, t::SKY);
+        } else {
+            ui.painter().text(
+                c,
+                Align2::CENTER_CENTER,
+                format!("{}", i + 1),
+                t::font(t::MICRO),
+                t::INK_MUTED,
+            );
+        }
+
+        ui.painter().text(
+            pos2(c.x, y + 22.0),
+            Align2::CENTER_CENTER,
+            *label,
+            t::font(t::SMALL),
+            if active { t::SKY_DEEP } else { t::mix(t::INK_SOFT, t::INK, hov * 0.6) },
+        );
+        if active {
+            ui.painter().text(
+                pos2(c.x, y + 36.0),
+                Align2::CENTER_CENTER,
+                *hint,
+                t::font(t::MICRO),
+                t::INK_MUTED,
+            );
+        }
+    }
+    clicked
 }

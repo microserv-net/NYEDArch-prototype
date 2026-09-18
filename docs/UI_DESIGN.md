@@ -64,6 +64,27 @@ rather than by adding a warning icon and a paragraph:
 An unselected card stays plain white, so the interface is calm until something
 actually warrants attention.
 
+## Layout: a spine and a standing object
+
+There is no sidebar. A vertical list of numbered steps down the left edge is
+what every settings window looks like, and it spent a fifth of the screen saying
+where you were rather than showing you anything.
+
+Instead:
+
+* **The stage spine** runs across the top — a chain of nodes with a light
+  travelling along the completed section, in the same direction as the perimeter
+  pulse, so the window has one direction of travel rather than two competing
+  ones. Only the active stage shows its hint, so the row stays quiet.
+* **The capsule stands beside the work**, full height, for the whole session. It
+  used to sit at the bottom of the sidebar beneath six navigation items — the
+  thing being built, filed under furniture.
+* **The work takes the rest**, with a hairline between object and controls so the
+  eye reads two things rather than one crowded column.
+
+The result is a console rather than a form: you are always looking at the thing
+you are making, and it is visibly changing as you configure it.
+
 ## The vault core
 
 The centrepiece, and the reason this does not read as a settings form.
