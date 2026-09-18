@@ -467,30 +467,36 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
 /// delivers whichever target happens to be listed first - a Windows binary to
 /// someone who asked for macOS. Callers pick by name instead.
 fn artifact_list(text: &str) -> Vec<(u64, String)> {
+    // Pair each artifact name with the id that *precedes* it in its own object.
+    //
+    // GitHub orders an artifact object as {"id":…,"node_id":…,"name":…,…,
+    // "workflow_run":{"id":…}}. Walking forward from every "id" and taking the
+    // next "name" therefore paired the nested workflow_run id with the *next*
+    // artifact's name - which is why a three-artifact run listed five, and why
+    // the chosen "artifact id" was the run id. Downloading that returns 404.
+    //
+    // Searching backwards from the name finds the id that opens the same
+    // object, and the nested run id sits after the name, so it is never picked.
     let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(i) = rest.find("\"id\":") {
-        rest = &rest[i + 5..];
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let Ok(id) = digits.parse::<u64>() else { continue };
-        let name = match rest.find("\"name\":\"") {
-            Some(j) => {
-                let after = &rest[j + 8..];
-                after.split('"').next().unwrap_or("").to_string()
+    let needle = "\"name\":\"nyedarch-capsule";
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(needle) {
+        let at = from + rel;
+        let name = text[at + 8..]
+            .split('"')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if let Some(idx) = text[..at].rfind("\"id\":") {
+            let digits: String = text[idx + 5..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                out.push((id, name));
             }
-            None => String::new(),
-        };
-        // Keep only real artifacts.
-        //
-        // An artifacts response nests other objects that also carry an "id" -
-        // the workflow run, the repository, the uploading actor. Scanning for
-        // every "id" therefore produced ids that are not artifacts, paired with
-        // whatever name happened to follow them, and downloading one of those
-        // returns nothing. Every capsule artifact is named for the build, so
-        // that is the filter.
-        if name.starts_with("nyedarch-capsule") {
-            out.push((id, name));
         }
+        from = at + needle.len();
     }
     out
 }
@@ -701,6 +707,39 @@ mod artifact_tests {
     /// actor, each with its own id. Treating those as artifacts produced ids
     /// that download to nothing - "no artifact was retrieved" for a build that
     /// had produced three.
+    /// A real artifacts response, nested workflow_run and all.
+    ///
+    /// Each artifact object carries its own id before the name, and a
+    /// workflow_run object with the *run* id after it. Pairing a name with the
+    /// preceding "id" is what keeps those apart; pairing it with the following
+    /// one selected the run id, and downloading that returned 404.
+    #[test]
+    fn the_artifact_id_is_taken_from_its_own_object() {
+        let listing = r#"{"total_count":3,"artifacts":[
+          {"id":111,"node_id":"MDg6QQ==","name":"nyedarch-capsule-x86_64-pc-windows-msvc",
+           "size_in_bytes":252783,"workflow_run":{"id":999111,"repository_id":42}},
+          {"id":222,"node_id":"MDg6Qg==","name":"nyedarch-capsule-aarch64-apple-darwin",
+           "size_in_bytes":289019,"workflow_run":{"id":999111,"repository_id":42}},
+          {"id":333,"node_id":"MDg6Qw==","name":"nyedarch-capsule-x86_64-unknown-linux-gnu",
+           "size_in_bytes":366332,"workflow_run":{"id":999111,"repository_id":42}}]}"#;
+
+        let all = super::artifact_list(listing);
+        assert_eq!(all.len(), 3, "three artifacts, not one per nested id: {all:?}");
+
+        let ids: Vec<u64> = all.iter().map(|(i, _)| *i).collect();
+        assert_eq!(ids, vec![111, 222, 333]);
+        assert!(
+            !ids.contains(&999111),
+            "the workflow run id is not an artifact id"
+        );
+
+        let linux = all
+            .iter()
+            .find(|(_, n)| n.contains("x86_64-unknown-linux-gnu"))
+            .expect("the linux artifact");
+        assert_eq!(linux.0, 333, "each name must carry its own object's id");
+    }
+
     #[test]
     fn nested_ids_are_not_mistaken_for_artifacts() {
         let listing = r#"{"total_count":1,"artifacts":[
@@ -708,7 +747,7 @@ mod artifact_tests {
            "workflow_run":{"id":999,"repository_id":777,"head_repository_id":888}}]}"#;
         let all = super::artifact_list(listing);
         assert_eq!(all.len(), 1, "only the artifact itself counts: {all:?}");
-        assert_eq!(all[0].0, 555);
+        assert_eq!(all[0].0, 555, "not the nested run or repository id");
     }
 
     #[test]
