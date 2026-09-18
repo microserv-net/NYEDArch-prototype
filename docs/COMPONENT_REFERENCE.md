@@ -320,6 +320,14 @@ The client. Never reaches a capsule.
 - `harden`: the client's own anti-analysis check — advisory, never denying.
 - `eula`: shared licence gating for both clients.
 - `bench`: fingerprinting, Argon2id and codec measurements.
+- `logging`: verbose diagnostics, timestamped in IST. Off unless `--with-logs`
+  or the desktop switch asks for them. Reports **which provider answered a
+  location request and how accurate the fix was** - the client previously knew
+  and discarded it, so nobody could tell whether a location had really been
+  captured. Accuracy in metres, never coordinates; signal names, never raw
+  identifiers. Lines are buffered for the desktop client, where stderr goes
+  nowhere a user will look, and the buffer is bounded so it cannot grow without
+  limit.
 
 ---
 

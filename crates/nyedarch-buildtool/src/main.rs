@@ -27,6 +27,13 @@ fn main() {
     // find out.
     let cli = Cli::parse();
 
+    // Set before any work begins, so the first step is already reported.
+    nyedarch_buildtool::logging::set_verbose(cli.with_logs);
+    nyedarch_buildtool::logging::log("client", format!(
+        "nyedarch {} starting",
+        env!("CARGO_PKG_VERSION")
+    ));
+
     // Rebuilt for the sections still driven by positional parsing. Removing the
     // last of those is mechanical; doing it in one step would have meant a very
     // large untested change, so the parser is authoritative and the older code

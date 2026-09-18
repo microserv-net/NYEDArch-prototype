@@ -180,6 +180,8 @@ struct App {
     /// Compression effort (spec §16) and creator mode (spec §50).
     compression: nyedarch_package::pipeline::CompressionMode,
     creator_mode: bool,
+    /// Verbose, timestamped diagnostics in the activity log.
+    with_logs: bool,
     /// Set to cancel an in-flight build (spec §61).
     cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Creator-mode diagnostics from the last build.
@@ -257,6 +259,7 @@ impl Default for App {
             run_ok: false,
             compression: nyedarch_package::pipeline::CompressionMode::Automatic,
             creator_mode: false,
+            with_logs: false,
             cancel_flag: None,
             pending_diagnostics: Vec::new(),
             pulse_phase: 0.0,
@@ -349,8 +352,20 @@ impl App {
         }
     }
 
+    /// Append an activity line.
+    ///
+    /// Timestamped in IST when verbose logging is on, so a line here lines up
+    /// with the same run's command-line output. Without it the two logs
+    /// describe one build in two vocabularies and neither can be checked
+    /// against the other.
     fn say(&mut self, now: f64, msg: impl Into<String>) {
-        self.log.push((now, msg.into()));
+        let text = msg.into();
+        let text = if self.with_logs {
+            format!("{}  {text}", nyedarch_buildtool::logging::timestamp())
+        } else {
+            text
+        };
+        self.log.push((now, text));
         if self.log.len() > 200 {
             self.log.remove(0);
         }
@@ -1774,6 +1789,35 @@ impl App {
             });
         });
         self.creator_mode = creator;
+
+        ui.add_space(6.0);
+        let mut logs = self.with_logs;
+        ui.horizontal(|ui| {
+            w::switch(ui, "sw_logs", &mut logs, false);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Verbose logs").size(t::SMALL).color(t::INK));
+                ui.label(
+                    egui::RichText::new(
+                        "Timestamped diagnostics in IST: which provider answered a location \
+                         request and how accurate it was, how long key derivation took, how much \
+                         was sealed.",
+                    )
+                    .size(t::MICRO)
+                    .color(t::INK_MUTED),
+                );
+            });
+        });
+        if logs != self.with_logs {
+            self.with_logs = logs;
+            // The pipeline reads this flag on the worker thread, so it has to be
+            // set globally rather than passed down.
+            nyedarch_buildtool::logging::set_verbose(logs);
+            // Buffer rather than write to stderr: from an application bundle,
+            // stderr goes nowhere the user will look.
+            nyedarch_buildtool::logging::set_capture(logs);
+            self.say(now, if logs { "Verbose logging on." } else { "Verbose logging off." });
+        }
         if !self.ready_to_build() {
             ui.add_space(6.0);
             let missing = if !self.step_done(Step::Source) {
@@ -2214,6 +2258,14 @@ impl eframe::App for App {
         self.handle_drops(ctx, now);
 
         self.poll_build(now);
+
+        // Diagnostics produced on the worker thread, drained into the log the
+        // user is actually looking at.
+        if self.with_logs {
+            for line in nyedarch_buildtool::logging::drain() {
+                self.log.push((now, line));
+            }
+        }
 
         self.menu_bar(ctx, now);
         self.rail(ctx, now);
