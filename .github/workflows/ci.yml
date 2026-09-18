@@ -37,7 +37,22 @@ jobs:
           key: ${{ matrix.os }}
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        shell: bash
+        run: |
+          # Compiler errors as annotations.
+          #
+          # rustc output lives in the job log, which needs GitHub's storage
+          # host - unreachable from some networks. A bare "exit code 101" is not
+          # a diagnosis, and guessing at one wastes a full CI cycle.
+          set +e
+          cargo build --workspace --all-targets 2>&1 | tee /tmp/build.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            grep -E "^(error|warning)" -A4 /tmp/build.txt | head -40 | while IFS= read -r line; do
+              echo "::error::rustc: ${line}"
+            done
+            exit "$code"
+          fi
 
       # Warnings are failures here. A generated capsule is compiled in a log the
       # public can read when the build repository is public, and a warning is

@@ -233,7 +233,10 @@ pub fn run_remote_build_with(
                     // runtime source with it (spec §22). A sibling file is
                     // unambiguous: that one is the capsule.
                     None => {
-                        let mut p = args.project_dir.clone();
+                        // to_path_buf, not clone: project_dir is a &Path, and
+                        // cloning a reference yields another reference, which
+                        // set_file_name cannot take.
+                        let mut p = args.project_dir.to_path_buf();
                         let name = p
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
