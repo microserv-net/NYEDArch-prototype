@@ -220,19 +220,27 @@ whatever happens to be on the operator's machine. A local fallback existed
 briefly and was removed - quietly compiling on the client when the remote build
 failed would produce a capsule none of those properties applied to.
 
-### Three delivery bugs, and why unit tests missed all of them
+### Nine delivery bugs, and why unit tests missed all of them
 
-Each of these passed every existing test and still meant the user received
-nothing usable.
+Each passed every existing test and still meant the user received nothing
+usable. They are listed in the order the end-to-end test found them, because
+that order is the argument for having it: each fix revealed the next.
 
-| Bug | Effect |
-|---|---|
-| Redirects were not followed | The download answered 302 and the client treated it as failure |
-| The provenance check ran on the **zip** | The capsule inside is deflated, so the commitment could never be found: every build was refused |
-| The **first** artifact was taken | A macOS build handed back a Windows binary, which does not run |
+| # | Bug | Effect |
+|---|---|---|
+| 1 | Redirects were not followed | The download answered 302 and the client treated it as failure |
+| 2 | Provenance ran on the **zip** | The capsule inside is deflated, so the commitment could never be found: every build refused |
+| 3 | The **first** artifact was taken | A macOS build handed back a Windows binary, which does not run |
+| 4 | An already-finished run was adopted | The client skipped the wait and looked for artifacts that were long gone |
+| 5 | Local headers were parsed | Actions streams the zip, so sizes live in the central directory; nothing was readable |
+| 6 | Provenance compared a **digest** | The capsule embeds the package, not its hash - wrong by construction |
+| 7 | Nested `"id"` fields were counted | Ids belonging to a run or repository were treated as artifacts |
+| 8 | A name was paired with the **next** id | The download received a *run* id and returned 404 |
+| 9 | The capsule landed **inside** the project | The deliverable sat among `Cargo.toml`, `src/` and `vendor/` |
 
 They have one thing in common: every component worked, and the path between them
-did not. That is what `.github/workflows/e2e.yml` now covers.
+did not. Nine consecutive failures in code that unit tests declared correct is
+the whole case for testing the path rather than the parts.
 
 ### The end-to-end test
 
@@ -248,6 +256,10 @@ client** against real GitHub with a real token, then asserts:
 - a wrong passphrase is refused and leaves no output;
 - **no runtime source** sits beside the delivered capsule - no `Cargo.toml`,
   `src`, `vendor`, `unlock` or `stage-capsule.sh` (spec §22).
+
+**Status: passing.** A capsule is built on real GitHub, retrieved, verified,
+run, and reproduces a nested source tree byte for byte, with no runtime source
+delivered beside it.
 
 It needs `NYEDARCH_BUILD_TOKEN` on the repository. A fork will not have it, so
 the job warns and skips rather than failing for a reason a contributor cannot

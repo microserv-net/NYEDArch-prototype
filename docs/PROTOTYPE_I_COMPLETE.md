@@ -48,7 +48,7 @@ suite, fingerprint capture, seal → build → run → byte-identical extraction
 denial without output, client key stability, build scripts, installer, and the
 macOS `.app` bundle.
 
-**162 automated tests, zero failures, zero warnings.**
+**the automated test suite, zero failures, zero warnings.**
 
 ## What is deliberately not here
 
