@@ -41,6 +41,21 @@ and for a different reason. See `CASE_STUDIES.md` CS-01.
 | Clients | CLI and desktop at full parity through one shared pipeline |
 | Key storage | Platform keystore with a disclosed fallback; lock-serialised initialisation |
 
+## The delivery path, proven end to end
+
+Every earlier claim that a capsule could be built and delivered was made without
+evidence, and each was wrong. `.github/workflows/e2e.yml` now drives the shipped
+client against real GitHub on every push, and it passes: a capsule is sealed,
+built remotely, retrieved, checked against a commitment made beforehand, saved,
+executed, and reproduces a nested source tree byte for byte. A wrong passphrase
+is refused with no output, and no runtime source is delivered beside it.
+
+It found nine bugs getting there, each of which passed every unit test at the
+time. They are listed in `GITHUB_SECURITY.md`. They share one shape: every
+component correct in isolation, the path between them wrong. That is the case
+for testing the path, and it is why this document did not previously deserve its
+title.
+
 ## Verified on real hardware
 
 Not merely compiled — executed on Linux, macOS and Windows runners: the full

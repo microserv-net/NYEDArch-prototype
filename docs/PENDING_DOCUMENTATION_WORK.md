@@ -109,6 +109,20 @@ Anything not implemented stays **DESIGNED — NOT IMPLEMENTED**.
 
 ---
 
+## Prototype-I: what is genuinely left
+
+Everything below is blocked on something this project does not have, not on
+effort. Checked against the source rather than from memory:
+
+| Check | State |
+|---|---|
+| Panics in capsule-side code | none |
+| `unsafe` outside the CoreLocation binding | none |
+| Secret material reaching a formatter | none |
+| Desktop client built by CI | yes, warnings are failures |
+| Documented counts verified by CI | yes |
+| Remote delivery proven end to end | yes |
+
 ## Open items carried forward
 
 | Item | State |
