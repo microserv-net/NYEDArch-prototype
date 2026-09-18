@@ -1043,13 +1043,20 @@ impl App {
 
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                     ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("protections engaged")
-                            .size(t::MICRO)
-                            .color(t::INK_MUTED),
-                    );
                     ui.add_space(2.0);
-                    w::posture_ring(ui, 104.0, self.active_protections(), 4, now);
+                    w::vault_core(
+                        ui,
+                        208.0,
+                        [
+                            true, // machine: mandatory, always engaged
+                            self.passphrase_acceptable(),
+                            self.protections.location,
+                            self.protections.time,
+                        ],
+                        self.build_progress,
+                        self.building,
+                        now,
+                    );
                 });
             });
     }
@@ -1329,7 +1336,7 @@ impl App {
                             rect,
                             Rounding::same(rect.height() / 2.0),
                             t::alpha(colour, if on { 0.20 } else { 0.08 }),
-                            Stroke::new(1.0, t::alpha(colour, if on { 0.8 } else { 0.35 })),
+                            Stroke::new(1.0_f32, t::alpha(colour, if on { 0.8 } else { 0.35 })),
                         );
                         ui.painter().galley(rect.min + vec2(10.0, 5.0), galley, colour);
                         if resp.clicked() {
@@ -1938,7 +1945,7 @@ impl App {
                 ui.set_max_width(660.0);
                 egui::Frame::none()
                     .fill(t::SURFACE)
-                    .stroke(Stroke::new(1.0, t::alpha(t::SKY, 0.35)))
+                    .stroke(Stroke::new(1.0_f32, t::alpha(t::SKY, 0.35)))
                     .rounding(t::card_rounding())
                     .inner_margin(egui::Margin::symmetric(26.0, 22.0))
                     .show(ui, |ui| {
@@ -2060,7 +2067,7 @@ impl App {
             .frame(
                 egui::Frame::none()
                     .fill(t::SURFACE)
-                    .stroke(Stroke::new(1.0, t::alpha(t::SKY, 0.35)))
+                    .stroke(Stroke::new(1.0_f32, t::alpha(t::SKY, 0.35)))
                     .rounding(t::card_rounding())
                     .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
             )
@@ -2175,7 +2182,7 @@ impl App {
             rect,
             t::card_rounding(),
             t::alpha(t::SUNKEN, 0.97 * fade),
-            Stroke::new(1.0, t::alpha(colour, 0.85 * fade)),
+            Stroke::new(1.0_f32, t::alpha(colour, 0.85 * fade)),
         );
         painter.circle_filled(pos2(rect.left() + 20.0, rect.center().y), 5.0, t::alpha(colour, fade));
         painter.text(

@@ -64,6 +64,32 @@ rather than by adding a warning icon and a paragraph:
 An unselected card stays plain white, so the interface is calm until something
 actually warrants attention.
 
+## The vault core
+
+The centrepiece, and the reason this does not read as a settings form.
+
+A security tool that looks like a preferences pane teaches people to treat it
+like one. Here the thing being built is on screen the whole time: four rings
+orbit a core, one per protection, and each **snaps into place** when that
+protection engages. The core's iris closes as the build completes.
+
+Nothing on it is decorative:
+
+| Element | Meaning |
+|---|---|
+| Ring locked and bright | That protection is engaged |
+| Ring drifting and faint | Available, not engaged |
+| Lug seated into the bezel | The moment a protection takes hold |
+| Iris closed | Sealed |
+| Spin rate | Idle, working, or done |
+| Violet sweep | A build is running |
+
+It leans very slightly toward the pointer, which is enough to feel like an object
+rather than a printed diagram, and not enough to distract.
+
+It replaced a segmented ring that counted protections. A count is a number you
+read; a lock closing is something you watch happen.
+
 ## Controls are drawn, not themed
 
 Recolouring a stock control leaves it looking stock. Text fields, sliders and

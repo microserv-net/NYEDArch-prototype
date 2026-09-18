@@ -176,7 +176,7 @@ pub fn perimeter_pulse_at(ctx: &egui::Context, phase: f64, intensity: f32) {
     for i in 0..rail_steps {
         let a = perimeter_point(r, i as f32 / rail_steps as f32);
         let b = perimeter_point(r, (i + 1) as f32 / rail_steps as f32);
-        painter.line_segment([a, b], Stroke::new(1.0, t::alpha(t::LINE_STRONG, 0.75)));
+        painter.line_segment([a, b], Stroke::new(1.0_f32, t::alpha(t::LINE_STRONG, 0.75)));
     }
 
     // The comet: a short arc whose alpha and width fall off behind the head.
@@ -229,7 +229,7 @@ pub fn aperture(painter: &egui::Painter, center: Pos2, size: f32, time: f64, ope
     let spin = if live { (time * 0.28) as f32 } else { (time * 0.05) as f32 };
     let r_out = size * 0.5;
 
-    painter.circle_stroke(center, r_out, Stroke::new(1.2, t::alpha(t::LINE_STRONG, 0.9)));
+    painter.circle_stroke(center, r_out, Stroke::new(1.2_f32, t::alpha(t::LINE_STRONG, 0.9)));
     for i in 0..24 {
         let a = spin * 0.35 + i as f32 * std::f32::consts::TAU / 24.0;
         let long = i % 6 == 0;
@@ -240,7 +240,7 @@ pub fn aperture(painter: &egui::Painter, center: Pos2, size: f32, time: f64, ope
                 pos2(center.x + r0 * a.cos(), center.y + r0 * a.sin()),
                 pos2(center.x + r_out * a.cos(), center.y + r_out * a.sin()),
             ],
-            Stroke::new(1.0, c),
+            Stroke::new(1.0_f32, c),
         );
     }
 
@@ -263,7 +263,7 @@ pub fn aperture(painter: &egui::Painter, center: Pos2, size: f32, time: f64, ope
             fill: t::mix(t::alpha(t::SKY, 0.20), t::alpha(t::SKY_BRIGHT, 0.10), open),
             stroke: Stroke::NONE,
         }));
-        painter.line_segment([p_a, p_b], Stroke::new(1.0, t::alpha(t::SKY, 0.35 + 0.3 * (1.0 - open))));
+        painter.line_segment([p_a, p_b], Stroke::new(1.0_f32, t::alpha(t::SKY, 0.35 + 0.3 * (1.0 - open))));
     }
 
     let core_r = size * (0.055 + 0.09 * open) * (1.0 + 0.08 * pulse);
@@ -272,7 +272,7 @@ pub fn aperture(painter: &egui::Painter, center: Pos2, size: f32, time: f64, ope
         glow(painter, center, size * 0.32, t::SKY, 0.5 + 0.4 * pulse);
     }
     painter.circle_filled(center, core_r, core_c);
-    painter.circle_stroke(center, core_r * 1.9, Stroke::new(1.0, t::alpha(core_c, 0.35)));
+    painter.circle_stroke(center, core_r * 1.9, Stroke::new(1.0_f32, t::alpha(core_c, 0.35)));
 }
 
 // ------------------------------------------------------------------ card ----
@@ -308,7 +308,7 @@ pub fn card(
     }
     let edge = t::mix(t::LINE, accent, (lift * 0.5 + sel * 0.9).min(1.0));
     ui.painter()
-        .rect_stroke(rect, t::card_rounding(), Stroke::new(1.0, edge));
+        .rect_stroke(rect, t::card_rounding(), Stroke::new(1.0_f32, edge));
 
     // A short accent bar on the left edge of a selected card.
     if sel > 0.01 {
@@ -341,7 +341,7 @@ pub fn card_outlined(
     drop_shadow(ui.painter(), rect, 0.25);
     ui.painter().rect_filled(rect, t::card_rounding(), t::SURFACE);
     ui.painter()
-        .rect_stroke(rect, t::card_rounding(), Stroke::new(1.4, t::alpha(accent, 0.85)));
+        .rect_stroke(rect, t::card_rounding(), Stroke::new(1.4_f32, t::alpha(accent, 0.85)));
     let content = rect.shrink2(vec2(18.0, 10.0));
     let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::Min));
     let _ = ui.id().with(id_salt);
@@ -408,7 +408,7 @@ pub fn switch(ui: &mut Ui, id_salt: &str, on: &mut bool, locked: bool) -> Respon
     ui.painter().rect_stroke(
         rect,
         r,
-        Stroke::new(1.0, if *on { t::alpha(on_col, 0.9) } else { t::mix(t::LINE_STRONG, t::SKY, hov) }),
+        Stroke::new(1.0_f32, if *on { t::alpha(on_col, 0.9) } else { t::mix(t::LINE_STRONG, t::SKY, hov) }),
     );
 
     let travel = rect.width() - rect.height();
@@ -418,72 +418,12 @@ pub fn switch(ui: &mut Ui, id_salt: &str, on: &mut bool, locked: bool) -> Respon
     ui.painter().circle_filled(knob, kr, Color32::WHITE);
     if locked {
         // A keyhole dot, so the meaning does not depend on font coverage.
-        ui.painter().circle_stroke(knob, kr * 0.42, Stroke::new(1.6, t::alpha(on_col, 0.85)));
+        ui.painter().circle_stroke(knob, kr * 0.42, Stroke::new(1.6_f32, t::alpha(on_col, 0.85)));
     }
     resp
 }
 
 // -------------------------------------------------------------- posture -----
-
-/// Segmented ring showing how many protections are engaged. Each segment
-/// sweeps in when it becomes active, so enabling a protection is visible
-/// somewhere other than the control just touched.
-pub fn posture_ring(ui: &mut Ui, size: f32, active: usize, total: usize, time: f64) {
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let center = rect.center();
-    let radius = size * 0.36;
-    let shown = ui
-        .ctx()
-        .animate_value_with_time(ui.id().with("posture"), active as f32, 0.5);
-
-    let total = total.max(1);
-    let gap = 0.12;
-    for i in 0..total {
-        let seg = std::f32::consts::TAU / total as f32;
-        let a0 = -std::f32::consts::FRAC_PI_2 + i as f32 * seg + gap * 0.5;
-        let a1 = a0 + seg - gap;
-        let fill = (shown - i as f32).clamp(0.0, 1.0);
-
-        let steps = 16;
-        for k in 0..steps {
-            let f0 = k as f32 / steps as f32;
-            let f1 = (k + 1) as f32 / steps as f32;
-            if f0 > fill && fill < 1.0 {
-                // Unfilled remainder of a partially swept segment.
-                let c = t::alpha(t::LINE_STRONG, 0.9);
-                let b0 = a0 + (a1 - a0) * f0;
-                let b1 = a0 + (a1 - a0) * f1;
-                ui.painter().line_segment(
-                    [
-                        pos2(center.x + radius * b0.cos(), center.y + radius * b0.sin()),
-                        pos2(center.x + radius * b1.cos(), center.y + radius * b1.sin()),
-                    ],
-                    Stroke::new(5.0, c),
-                );
-                continue;
-            }
-            let b0 = a0 + (a1 - a0) * f0;
-            let b1 = a0 + (a1 - a0) * f1;
-            let c = t::mix(t::SKY_BRIGHT, t::SKY_DEEP, i as f32 / total as f32);
-            ui.painter().line_segment(
-                [
-                    pos2(center.x + radius * b0.cos(), center.y + radius * b0.sin()),
-                    pos2(center.x + radius * b1.cos(), center.y + radius * b1.sin()),
-                ],
-                Stroke::new(5.0, c),
-            );
-        }
-    }
-
-    aperture(ui.painter(), center, size * 0.44, time, 1.0 - (shown / total as f32) * 0.85, false);
-    ui.painter().text(
-        center + vec2(0.0, radius + 18.0),
-        Align2::CENTER_CENTER,
-        format!("{active} of {total}"),
-        t::font(t::MICRO),
-        t::INK_MUTED,
-    );
-}
 
 // ------------------------------------------------------------- navigation ---
 
@@ -523,13 +463,13 @@ pub fn nav_item(
             [pos2(mc.x - s * 0.75, mc.y + 0.2), pos2(mc.x - s * 0.1, mc.y + s * 0.62)],
             [pos2(mc.x - s * 0.1, mc.y + s * 0.62), pos2(mc.x + s * 0.85, mc.y - s * 0.6)],
         ] {
-            ui.painter().line_segment(seg, Stroke::new(2.0, Color32::WHITE));
+            ui.painter().line_segment(seg, Stroke::new(2.0_f32, Color32::WHITE));
         }
     } else if active {
-        ui.painter().circle_stroke(mc, 9.0, Stroke::new(2.0, t::SKY));
+        ui.painter().circle_stroke(mc, 9.0, Stroke::new(2.0_f32, t::SKY));
         ui.painter().circle_filled(mc, 3.6, t::SKY);
     } else {
-        ui.painter().circle_stroke(mc, 9.0, Stroke::new(1.3, t::LINE_STRONG));
+        ui.painter().circle_stroke(mc, 9.0, Stroke::new(1.3_f32, t::LINE_STRONG));
         ui.painter().text(
             mc,
             Align2::CENTER_CENTER,
@@ -573,7 +513,7 @@ pub fn primary_button(ui: &mut Ui, id_salt: &str, label: &str, enabled: bool, wi
 
     if !enabled {
         ui.painter().rect_filled(r, round, t::SUNKEN);
-        ui.painter().rect_stroke(r, round, Stroke::new(1.0, t::LINE));
+        ui.painter().rect_stroke(r, round, Stroke::new(1.0_f32, t::LINE));
         ui.painter()
             .text(r.center(), Align2::CENTER_CENTER, label, t::font(t::BODY), t::INK_MUTED);
         return resp;
@@ -587,7 +527,7 @@ pub fn primary_button(ui: &mut Ui, id_salt: &str, label: &str, enabled: bool, wi
         t::mix(t::SKY_BRIGHT, Color32::WHITE, 0.18 * hov),
         t::SKY,
     );
-    ui.painter().rect_stroke(r, round, Stroke::new(1.0, t::alpha(t::SKY_DEEP, 0.55)));
+    ui.painter().rect_stroke(r, round, Stroke::new(1.0_f32, t::alpha(t::SKY_DEEP, 0.55)));
     ui.painter()
         .text(r.center(), Align2::CENTER_CENTER, label, t::font(t::BODY), Color32::WHITE);
     resp
@@ -601,7 +541,7 @@ pub fn ghost_button(ui: &mut Ui, id_salt: &str, label: &str, width: f32) -> Resp
     let round = Rounding::same(t::R_CONTROL);
     ui.painter().rect_filled(rect, round, t::mix(t::SURFACE, t::SKY_WASH, hov));
     ui.painter()
-        .rect_stroke(rect, round, Stroke::new(1.0, t::mix(t::LINE_STRONG, t::SKY, hov)));
+        .rect_stroke(rect, round, Stroke::new(1.0_f32, t::mix(t::LINE_STRONG, t::SKY, hov)));
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -700,7 +640,7 @@ pub fn drop_zone(ui: &mut Ui, height: f32, armed: bool, filled: Option<&str>, ti
                 if e > s {
                     ui.painter().line_segment(
                         [from + dir * s, from + dir * e],
-                        Stroke::new(1.4, t::alpha(t::SKY, 0.55 * (1.0 - a))),
+                        Stroke::new(1.4_f32, t::alpha(t::SKY, 0.55 * (1.0 - a))),
                     );
                 }
                 d += period;
@@ -753,12 +693,12 @@ pub fn build_indicator(ui: &mut Ui, size: f32, progress: f32, running: bool, tim
         for k in 0..3 {
             let phase = ((time * 0.55 + k as f64 * 0.33) % 1.0) as f32;
             let r = size * 0.46 * (0.55 + phase * 0.45);
-            painter.circle_stroke(center, r, Stroke::new(1.4, t::alpha(t::SKY, (1.0 - phase) * 0.35)));
+            painter.circle_stroke(center, r, Stroke::new(1.4_f32, t::alpha(t::SKY, (1.0 - phase) * 0.35)));
         }
     }
 
     let radius = size * 0.34;
-    painter.circle_stroke(center, radius, Stroke::new(6.0, t::SUNKEN));
+    painter.circle_stroke(center, radius, Stroke::new(6.0_f32, t::SUNKEN));
     let segments = 90;
     let start = -std::f32::consts::FRAC_PI_2;
     for i in 0..segments {
@@ -774,7 +714,7 @@ pub fn build_indicator(ui: &mut Ui, size: f32, progress: f32, running: bool, tim
                 pos2(center.x + radius * a0.cos(), center.y + radius * a0.sin()),
                 pos2(center.x + radius * a1.cos(), center.y + radius * a1.sin()),
             ],
-            Stroke::new(6.0, t::mix(t::SKY_BRIGHT, t::SKY_DEEP, f0)),
+            Stroke::new(6.0_f32, t::mix(t::SKY_BRIGHT, t::SKY_DEEP, f0)),
         );
     }
 
@@ -796,7 +736,7 @@ pub fn segmented(ui: &mut Ui, id_salt: &str, options: &[&str], selected: usize) 
     let round = Rounding::same(rect.height() / 2.0);
 
     ui.painter().rect_filled(rect, round, t::SUNKEN);
-    ui.painter().rect_stroke(rect, round, Stroke::new(1.0, t::LINE));
+    ui.painter().rect_stroke(rect, round, Stroke::new(1.0_f32, t::LINE));
 
     let inner = rect.shrink(4.0);
     let w = inner.width() / n as f32;
@@ -815,7 +755,7 @@ pub fn segmented(ui: &mut Ui, id_salt: &str, options: &[&str], selected: usize) 
     ui.painter().rect_stroke(
         pill_rect,
         Rounding::same(pill_rect.height() / 2.0),
-        Stroke::new(1.0, t::alpha(t::SKY, 0.75)),
+        Stroke::new(1.0_f32, t::alpha(t::SKY, 0.75)),
     );
 
     let mut clicked = None;
@@ -881,14 +821,14 @@ pub fn field(
     ui.painter().rect_stroke(
         rect,
         round,
-        Stroke::new(1.0, t::mix(t::LINE, t::alpha(t::SKY, 0.9), focus.max(hov * 0.4))),
+        Stroke::new(1.0_f32, t::mix(t::LINE, t::alpha(t::SKY, 0.9), focus.max(hov * 0.4))),
     );
     if focus > 0.01 {
         // A soft ring, so focus arrives rather than snapping.
         ui.painter().rect_stroke(
             rect.expand(2.0),
             Rounding::same(t::R_CONTROL + 2.0),
-            Stroke::new(2.0, t::alpha(t::SKY, 0.20 * focus)),
+            Stroke::new(2.0_f32, t::alpha(t::SKY, 0.20 * focus)),
         );
     }
 
@@ -933,7 +873,7 @@ pub fn slider(ui: &mut Ui, id_salt: &str, value: &mut u32, range: std::ops::Rang
     ui.painter().circle_filled(knob + vec2(0.0, 1.0), 8.0, t::alpha(Color32::BLACK, 0.10));
     ui.painter().circle_filled(knob, 7.0 + hov, Color32::WHITE);
     ui.painter()
-        .circle_stroke(knob, 7.0 + hov, Stroke::new(1.5, t::mix(t::SKY, t::SKY_DEEP, hov)));
+        .circle_stroke(knob, 7.0 + hov, Stroke::new(1.5_f32, t::mix(t::SKY, t::SKY_DEEP, hov)));
 
     ui.painter().text(
         pos2(rect.right(), rect.center().y),
@@ -1009,4 +949,165 @@ pub fn strength_meter(ui: &mut Ui, width: f32, score: f32, label: &str, colour: 
     }
     ui.add_space(4.0);
     ui.label(egui::RichText::new(label).size(t::MICRO).color(colour));
+}
+
+// ------------------------------------------------------------ vault core ---
+
+/// The capsule, drawn as a physical object that locks itself shut.
+///
+/// This is the centrepiece, and it exists because a security tool that looks
+/// like a settings form teaches people to treat it like one. Here the thing you
+/// are building is on screen the whole time: four rings orbit a core, one per
+/// protection, and each **snaps into place** when that protection engages. The
+/// core seals as the build completes.
+///
+/// It is not decoration - every element reports state:
+///
+/// * ring locked and bright  → that protection is engaged
+/// * ring drifting and faint → available, not engaged
+/// * core iris closed        → sealed
+/// * spin rate               → idle, working, done
+///
+/// `engaged` is one flag per ring, `progress` runs 0..1, `working` speeds
+/// everything up.
+pub fn vault_core(
+    ui: &mut Ui,
+    size: f32,
+    engaged: [bool; 4],
+    progress: f32,
+    working: bool,
+    time: f64,
+) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let c = rect.center();
+    let p = progress.clamp(0.0, 1.0);
+    let painter = ui.painter();
+
+    // A hover tilt, so the object feels physical rather than printed. Tiny on
+    // purpose: enough to notice, not enough to distract.
+    let hov = ui
+        .ctx()
+        .animate_bool_with_time(ui.id().with("vault_hover"), resp.hovered(), 0.25);
+    let lean = if let Some(m) = ui.ctx().pointer_latest_pos() {
+        ((m.x - c.x) / size).clamp(-1.0, 1.0) * 0.10 * hov
+    } else {
+        0.0
+    };
+
+    let base = size * 0.5;
+    let spin = if working { time * 0.85 } else { time * 0.12 };
+
+    // Outer bezel: a faint dial the rings run inside.
+    painter.circle_stroke(c, base * 0.94, Stroke::new(1.0_f32, t::alpha(t::LINE_STRONG, 0.9)));
+    for i in 0..48 {
+        let a = i as f32 * std::f32::consts::TAU / 48.0 + lean;
+        let long = i % 4 == 0;
+        let r0 = base * if long { 0.86 } else { 0.90 };
+        painter.line_segment(
+            [
+                pos2(c.x + r0 * a.cos(), c.y + r0 * a.sin()),
+                pos2(c.x + base * 0.94 * a.cos(), c.y + base * 0.94 * a.sin()),
+            ],
+            Stroke::new(1.0_f32, t::alpha(if long { t::SKY } else { t::LINE_STRONG }, 0.75)),
+        );
+    }
+
+    // Four rings, innermost first, each a protection.
+    for (i, on) in engaged.iter().enumerate() {
+        let id = ui.id().with(("vault_ring", i));
+        let lock = ui.ctx().animate_bool_with_time(id, *on, 0.45);
+        let e = t::ease_out_back(lock).clamp(0.0, 1.15);
+
+        let radius = base * (0.40 + 0.13 * i as f32);
+        // Unlocked rings drift; a locked one snaps to its detent and stays.
+        let drift = (spin as f32) * (0.5 + 0.2 * i as f32) * (1.0 - lock);
+        let detent = i as f32 * 0.45;
+        let rot = drift + detent + lean;
+
+        let colour = if *on { t::SKY } else { t::INK_MUTED };
+        let arc = 0.62 + 0.30 * e; // the ring closes as it locks
+        let steps = 40;
+        for k in 0..steps {
+            let f0 = k as f32 / steps as f32;
+            let f1 = (k + 1) as f32 / steps as f32;
+            if f0 > arc {
+                break;
+            }
+            let a0 = rot + f0 * std::f32::consts::TAU;
+            let a1 = rot + f1 * std::f32::consts::TAU;
+            painter.line_segment(
+                [
+                    pos2(c.x + radius * a0.cos(), c.y + radius * a0.sin()),
+                    pos2(c.x + radius * a1.cos(), c.y + radius * a1.sin()),
+                ],
+                Stroke::new(2.0 + 1.6 * e, t::alpha(colour, 0.30 + 0.70 * lock)),
+            );
+        }
+
+        // The lug: a bright block that seats into the bezel when locked. This
+        // is the "clunk" - the moment a protection visibly takes hold.
+        let lug_a = rot + arc * std::f32::consts::TAU;
+        let lug = pos2(c.x + radius * lug_a.cos(), c.y + radius * lug_a.sin());
+        if lock > 0.01 {
+            glow(painter, lug, 12.0 * lock, t::SKY, 0.5 * lock);
+        }
+        painter.circle_filled(lug, 2.8 + 2.2 * e, t::mix(t::INK_MUTED, t::SKY_BRIGHT, lock));
+    }
+
+    // The core: an iris that closes as the build completes.
+    let core_r = base * 0.30;
+    painter.circle_filled(c, core_r, t::SURFACE);
+    painter.circle_stroke(c, core_r, Stroke::new(1.2_f32, t::alpha(t::SKY, 0.55)));
+
+    let blades = 6;
+    let open = 1.0 - p;
+    for i in 0..blades {
+        let a = spin as f32 * 0.6 + i as f32 * std::f32::consts::TAU / blades as f32 + lean;
+        let a2 = a + std::f32::consts::TAU / blades as f32;
+        let mid = (a + a2) * 0.5;
+        let inner = core_r * (0.10 + 0.55 * open);
+        // Filled only: these slivers have a very acute inner vertex, and
+        // stroking it throws a miter spike well outside the shape.
+        painter.add(Shape::Path(PathShape {
+            points: vec![
+                pos2(c.x + inner * mid.cos(), c.y + inner * mid.sin()),
+                pos2(c.x + core_r * 0.92 * a.cos(), c.y + core_r * 0.92 * a.sin()),
+                pos2(c.x + core_r * 0.92 * a2.cos(), c.y + core_r * 0.92 * a2.sin()),
+            ],
+            closed: true,
+            fill: t::alpha(t::mix(t::SKY_BRIGHT, t::SKY_DEEP, p), 0.26 + 0.34 * p),
+            stroke: Stroke::NONE,
+        }));
+    }
+
+    // The heart, breathing while idle and steady while sealed.
+    let beat = t::breathe(time, if working { 0.9 } else { 3.2 });
+    let heart = core_r * (0.16 + 0.10 * p) * (1.0 + 0.10 * beat);
+    if working || p >= 1.0 {
+        glow(painter, c, core_r * (1.1 + 0.4 * beat), t::SKY, 0.45 + 0.3 * beat);
+    }
+    painter.circle_filled(c, heart, t::mix(t::SKY_BRIGHT, t::SKY_DEEP, p));
+
+    // Scanning sweep while working: the object is doing something.
+    if working {
+        let a = (time * 1.6) as f32;
+        let r = base * 0.94;
+        painter.line_segment(
+            [c, pos2(c.x + r * a.cos(), c.y + r * a.sin())],
+            Stroke::new(1.4_f32, t::alpha(t::VIOLET, 0.35)),
+        );
+    }
+
+    let engaged_n = engaged.iter().filter(|e| **e).count();
+    painter.text(
+        pos2(c.x, rect.bottom() - 6.0),
+        Align2::CENTER_CENTER,
+        if p >= 1.0 {
+            "SEALED".to_string()
+        } else {
+            format!("{engaged_n} of 4 locks engaged")
+        },
+        t::font(t::MICRO),
+        if p >= 1.0 { t::SKY_DEEP } else { t::INK_MUTED },
+    );
 }
