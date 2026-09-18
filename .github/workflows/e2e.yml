@@ -161,7 +161,9 @@ jobs:
           set -e
           CAP=$(grep -o "saved to [^ ]*" /tmp/remote.log | tail -1 | cut -d' ' -f3)
           DIR=$(dirname "$CAP")
-          # The user receives a capsule, not a Rust project (spec §22).
+          # The user receives a capsule, not a Rust project (spec §22). The
+          # capsule is delivered *beside* the working project, so its own
+          # directory must contain no trace of one.
           for forbidden in Cargo.toml src vendor unlock stage-capsule.sh; do
             if [ -e "$DIR/$forbidden" ]; then
               echo "::error::runtime source was delivered alongside the capsule: $forbidden"

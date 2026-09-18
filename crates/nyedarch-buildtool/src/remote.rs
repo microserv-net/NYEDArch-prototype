@@ -224,7 +224,23 @@ pub fn run_remote_build_with(
                 }
                 let dest = match &args.deliver_to {
                     Some(p) => p.clone(),
-                    None => args.project_dir.join("capsule.nyarch"),
+                    // Beside the project, never inside it.
+                    //
+                    // Writing the capsule into the project directory left it
+                    // sitting among Cargo.toml, src/, vendor/ and the rest -
+                    // the user has to pick their deliverable out of a Rust
+                    // project, and anyone they forward the directory to gets the
+                    // runtime source with it (spec §22). A sibling file is
+                    // unambiguous: that one is the capsule.
+                    None => {
+                        let mut p = args.project_dir.clone();
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "capsule".to_string());
+                        p.set_file_name(format!("{name}.nyarch"));
+                        p
+                    }
                 };
                 if let Some(parent) = dest.parent() {
                     let _ = std::fs::create_dir_all(parent);
