@@ -233,13 +233,23 @@ one authenticating the EULA acceptance record - are derived from a random
 32-byte master key held in the platform keystore: Keychain on macOS, Secret
 Service on Linux.
 
-**Windows uses the restricted file, not DPAPI (OPEN).** The PowerShell DPAPI
-round trip did not reproduce reliably on a real Windows runner - a store would
-report success and a later load return nothing, so every run minted a fresh key
-and every record signed previously became unverifiable. An unreliable keystore
-is worse than an honest file: the file is stable and the degradation is reported
-at startup. DPAPI is disabled there until it can be made deterministic and
-verified on real hardware. Each secret is domain-separated, so
+**Windows uses DPAPI again.** The first attempt went through PowerShell's
+`ConvertTo-SecureString` / `ConvertFrom-SecureString`, which did not round-trip
+on a real runner: a store reported success and a later load returned nothing, so
+every run minted a fresh key and every previously signed record became
+unverifiable.
+
+It now calls .NET `ProtectedData` directly - the primitive underneath those
+cmdlets, which takes and returns plain bytes rather than carrying SecureString
+and console-encoding behaviour. The secret crosses on **stdin** in both
+directions, never in a command line where another user could read it from the
+process list.
+
+The safety net matters more than the mechanism: `master_key` reads back what it
+stored and falls through to the restricted file if the value does not return
+identical. A keystore that cannot return what it was given is not trusted,
+whatever its documentation says - which is why the original failure cost nothing
+this time. Each secret is domain-separated, so
 recovering one reveals nothing about another.
 
 This replaced a constant compiled into the binary. Under the old scheme anyone

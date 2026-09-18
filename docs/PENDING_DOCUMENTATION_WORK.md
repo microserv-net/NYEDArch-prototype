@@ -114,7 +114,7 @@ Anything not implemented stays **DESIGNED — NOT IMPLEMENTED**.
 | Item | State |
 |---|---|
 | ~~Unauthenticated artifact byte on Windows~~ | **Resolved — it was a test defect.** `a11` set bytes to 0xFF without checking the value changed; offset 148 already held 0xFF on Windows. An exhaustive sweep (A12) confirms no unauthenticated byte exists |
-| Windows DPAPI key storage | Disabled — the round trip was unreliable and cost key stability. Windows uses the disclosed restricted file |
+| ~~Windows DPAPI key storage~~ | **Re-implemented** via .NET `ProtectedData`, the primitive under the cmdlets that failed. The secret crosses on stdin, never argv. `master_key` still verifies the read-back, so an unreliable store falls through to the file rather than losing records |
 | ~~Windows destruction layer 2~~ | **Fixed** — engages as `a self-removing scheduled task and a detached PowerShell` |
 | macOS location permission prompt | Needs a Mac with a user present |
 | TPM / Secure Enclave key operations | No runner has usable secure hardware; detection and fail-closed policy are done |
