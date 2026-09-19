@@ -700,16 +700,23 @@ mod dpapi_tests {
         }
     }
 
-    /// DPAPI must return exactly what it was given, or `master_key` falls back
-    /// to the file. This is the check the first implementation failed.
+    /// Deliberately NOT tested here: a live store-and-load round trip.
+    ///
+    /// The obvious test calls `keystore_store` with a known value and reads it
+    /// back. It passes, and it writes to the real keystore - replacing the
+    /// client key that every other test in this crate depends on. Tests running
+    /// beside it then fail, on Windows only, for reasons that have nothing to
+    /// do with what they assert. That is exactly what it did.
+    ///
+    /// The round trip is verified where it matters anyway: `master_key` reads
+    /// back what it stored on every start-up and falls through to the
+    /// restricted file if the value does not return identical. A test that
+    /// breaks its neighbours to prove something the product already checks is a
+    /// bad trade.
     #[test]
-    fn dpapi_returns_what_it_stored() {
-        let key: Vec<u8> = (0u8..32).collect();
-        if !keystore_store(&key) {
-            // Not available in this environment; the fallback covers it.
-            return;
-        }
-        let back = keystore_load().expect("a successful store must be readable");
-        assert_eq!(back, key, "DPAPI did not return the stored value");
+    fn the_store_path_is_derived_without_touching_it() {
+        let p = dpapi_path();
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("dpapi"));
+        assert!(p.parent().is_some(), "the secret must live under a directory");
     }
 }
