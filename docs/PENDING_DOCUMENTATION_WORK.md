@@ -65,7 +65,7 @@ from the attacker's and the defender's.
 | C3 | ~~**Version state machine**~~ **DONE** — `NYEDARCH_DISTRIBUTION_AND_UPDATES.md` | An issued capsule moves `VALID → SECURITY UPDATE REQUIRED → REVOKED/BLOCKED`, rather than staying valid forever because it was valid when issued. Requires runtime version, package format, crypto version, policy version, known-vulnerable status, minimum permitted version, revocation state. |
 | C4 | ~~**Land Mine as vulnerability containment**~~ **DONE** — `NYEDARCH_DISTRIBUTION_AND_UPDATES.md` | Not only a post-theft control: a known-vulnerable capsule can be forced into migration rather than left silently exploitable. |
 | C5 | ~~**Migration cost is a real risk**~~ **DONE** — `NYEDARCH_DISTRIBUTION_AND_UPDATES.md` | 500 capsules issued six months ago are not repaired by updating the Builder. If re-capsulation is expensive the burden scales with the estate, and public disclosure before migration completes hands the attacker a window. |
-| C6 | **Vulnerability research function** | Continuous adversarial research, responsible disclosure handling, emergency patching, staged rollout, telemetry on vulnerable versions, enforced migration where risk warrants it. |
+| C6 | ~~**Vulnerability research function**~~ **DONE** — `NYEDARCH_DISTRIBUTION_AND_UPDATES.md`; an operating commitment, marked as such | Continuous adversarial research, responsible disclosure handling, emergency patching, staged rollout, telemetry on vulnerable versions, enforced migration where risk warrants it. |
 
 **Why C matters for Prototype-I now:** a standalone capsule has *no* way to say
 "the artifact you made six months ago is known-vulnerable, stop using it". That

@@ -139,3 +139,32 @@ that it can learn about flaws discovered after it was sealed.
 
 Documenting this makes the architecture look more mature, not weaker. A system
 that claims no adoption gap is a system that has not thought about one.
+
+
+---
+
+## The vulnerability research function
+
+> **Prototype-II — yet to be developed.** This describes an intended operating
+> commitment, not software. It is recorded here because the lifecycle above
+> assumes someone performs it, and an architecture that assumes a function
+> nobody owns is an architecture with a hole in it.
+
+The migration machinery only helps if flaws are found by the project before they
+are found by someone else. That requires continuous work, not a launch-day
+audit:
+
+| Activity | Feeds |
+|---|---|
+| Continuous adversarial research against current runtimes | Discovery |
+| Responsible disclosure handling | Triage and severity |
+| Emergency patch capability | Patch and release |
+| Staged rollout | Release |
+| Telemetry on which generations are still in use | Notification, enforcement |
+| Enforced migration where risk warrants it | Revocation |
+
+Two honest points. Finding your own flaws first is a goal, not a guarantee —
+nobody gets to promise that. And the telemetry that tells you which generations
+are still in use is the same telemetry the privacy model constrains, so "know
+what is deployed" and "collect the minimum" are in tension and have to be
+resolved deliberately rather than by whichever ships first.
