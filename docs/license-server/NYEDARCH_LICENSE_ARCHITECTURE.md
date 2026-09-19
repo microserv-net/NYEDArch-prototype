@@ -95,3 +95,109 @@ challenge, so a captured session cannot be replayed for a second unlock.
 Telemetry ingestion, risk scoring, notification, and audit chaining are
 asynchronous behind a durable queue, so that a telemetry backlog can never delay
 or block a legitimate authorization. **Authorization is never queued.**
+
+
+---
+
+## The intended licensed system, end to end
+
+> **Prototype-II — yet to be developed.** Nothing below is implemented. It is
+> drawn as one picture because the relationships matter more than any single
+> box, and because a reviewer should be able to see at a glance which operations
+> are local, which need the server, and which paths destroy things.
+
+Four kinds of line, kept visually distinct:
+
+- `───` a cryptographic dependency: the thing downstream cannot proceed without it
+- `- ->` telemetry and audit, which never carries payload material
+- `═══` a destructive path
+- `···` a legitimate recovery path, always narrow and always audited
+
+```text
+                        ┌──────────────────────────────┐
+                        │      FINAL CAPSULE           │
+                        │  (in a hostile environment)  │
+                        └──────────────┬───────────────┘
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    │  local integrity and authenticity   │
+                    │  environment / security init        │
+                    └──────────────────┬──────────────────┘
+                                       │ fails ═══════════════╗
+                                       │                      ║
+              ┌────────────────────────┴───────────┐          ║
+              │   MANDATORY NETWORK DEPENDENCY     │          ║
+              │   (Managed mode; no silent         │          ║
+              │    fallback to Un-Managed)         │          ║
+              └────────────────────────┬───────────┘          ║
+                                       │                      ║
+   ┌───────────────────────────────────┴───────────────────┐  ║
+   │             PROTOTYPE-II LICENCE SERVER               │  ║
+   │                                                       │  ║
+   │  capsule identity ── account / licence identity       │  ║
+   │  server policy evaluation                             │  ║
+   │  authenticated time                                   │  ║
+   │  revocation state  ── Land Mine                       │  ║
+   │                                                       │  ║
+   │  emits:  - -> security telemetry                      │  ║
+   │          - -> anomaly detection - -> owner notice     │  ║
+   │                                                       │  ║
+   │  returns: SERVER KEY SHARE (cryptographic material,   │  ║
+   │           not a boolean permission)                   │  ║
+   └───────────────────────────────────┬───────────────────┘  ║
+                                       │ refused ═════════════╣
+                                       │                      ║
+        ┌──────────────────────────────┴──────────────────┐   ║
+        │        LOCAL AUTHORIZATION FACTORS              │   ║
+        │  machine ── passphrase ── [location] ── [time]  │   ║
+        └──────────────────────────────┬──────────────────┘   ║
+                                       │ any fails ═══════════╣
+                                       │                      ║
+                    ┌──────────────────┴──────────────────┐   ║
+                    │   CRYPTOGRAPHIC KEY COMPOSITION     │   ║
+                    │   every required contribution, or   │   ║
+                    │   no payload key at all             │   ║
+                    └──────────────────┬──────────────────┘   ║
+                                       │                      ║
+                    ┌──────────────────┴──────────────────┐   ║
+                    │     AUTHENTICATED DECRYPTION        │   ║
+                    └──────────────────┬──────────────────┘   ║
+                                       │                      ║
+                    ┌──────────────────┴──────────────────┐   ║
+                    │   PLAINTEXT (minimum lifetime)      │   ║
+                    └──────────────────┬──────────────────┘   ║
+                                       │                      ║
+                    ┌──────────────────┴──────────────────┐   ║
+                    │  cleanup ── optional destruction    │◄══╝
+                    └─────────────────────────────────────┘
+                              ║ destructive failure may consume
+                              ║ the capsule itself
+                              ▼
+
+   ···· LEGITIMATE RECOVERY (verified, narrow, one unlock, audited) ····
+        support request → identity verified → ownership verified →
+        named capsules only → single authorized unlock → audit record
+```
+
+### What the picture is meant to make obvious
+
+**The server contributes key material, not permission.** It sits on a
+cryptographic dependency line, not beside a branch. Patching a response to say
+"authorized" yields nothing, because there was never a boolean to patch — this
+is the Prototype-I invariant carried forward rather than replaced.
+
+**Local factors do not become optional.** The server share is an additional
+required contribution in Managed mode, not a substitute for the machine,
+passphrase, location or time contributions.
+
+**Every failure path leads to the same place**, and that place can destroy the
+artifact. There is no branch that fails into a partially-authorized state.
+
+**Telemetry never touches the payload path.** The dashed lines only leave the
+server box. Nothing on the decryption path reports upward, and the server never
+receives payload material, passphrases, or key material capable of opening a
+capsule alone.
+
+**Recovery is a separate, narrow path** — dotted, entered only through verified
+support, and audited. It is deliberately not connected to the normal flow,
+because a recovery route that touches the ordinary path is a bypass.

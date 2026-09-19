@@ -75,3 +75,92 @@ Disclosure states what is known, what is not yet known, and what the customer
 should do. It never claims confirmed containment before containment is
 confirmed — for the same reason the capsule never reports "destroyed" when it
 means "destruction requested".
+
+
+---
+
+## Land Mine: revoking a capsule that is already in the wild
+
+> **Prototype-II — yet to be developed.**
+
+A capsule is designed to be portable and long-lived. That is the point of it,
+and it is also the problem: once a copy has left, the owner has no way to reach
+it. A purely standalone archive can never say *"the artifact you shipped six
+months ago should no longer open."*
+
+A mandatory-online architecture can. The intended sequence:
+
+1. The owner suspects or confirms that a capsule has been compromised.
+2. The owner recovers their own data from trusted local copies where needed.
+3. The owner marks that capsule revoked.
+4. The server records the revocation.
+5. Later server-backed attempts involving that capsule are refused.
+6. The attempt produces security telemetry.
+7. Owner notification and monitoring follow the documented model.
+8. The artifact stays unusable through the server-backed path.
+
+**This is a post-compromise defensive control, not retaliation.** It denies
+future use and it creates evidence. It does nothing to the machine attempting
+the use, and nothing punitive is intended or implemented.
+
+### What it cannot do
+
+Stated plainly, because a control whose limits are vague gets trusted past them:
+
+- It **cannot recall plaintext already extracted**. If the payload was opened,
+  that data is gone from the owner's control permanently.
+- It **cannot erase copies** an attacker has made, of the capsule or of anything
+  taken out of it.
+- It **cannot observe an attacker who never contacts the server**, which
+  includes anyone attacking an Un-Managed capsule.
+- It **depends on the artifact attempting a server-backed operation**. An
+  attacker who never runs it is invisible to this mechanism, as they should be.
+
+### Why it is still worth having
+
+A compromised capsule does not have to remain a permanently useful stolen
+credential. The legitimate owner can turn future use attempts into a security
+event — which converts a silent, indefinite exposure into a bounded one that
+generates evidence.
+
+---
+
+## Post-compromise lifecycle
+
+> **Prototype-II — yet to be developed.**
+
+Detection, notification, audit preservation, revocation and lawful investigation
+are **distinct concepts** and are kept distinct here. Collapsing them is how
+security architectures end up claiming that noticing something is the same as
+containing it.
+
+```text
+suspicious capsule activity
+        ↓
+server-side event recorded
+        ↓
+anomaly detection
+        ↓
+owner notification
+        ↓
+owner confirms or suspects compromise
+        ↓
+legitimate copies used for data recovery, if required
+        ↓
+capsule revoked
+        ↓
+Land Mine active
+        ↓
+future server-backed use denied
+        ↓
+each further attempt produces telemetry
+```
+
+The honest limitation, again:
+
+> **If the attacker already extracted plaintext, none of this makes that
+> plaintext disappear.**
+
+The value of the post-compromise system is containment, continued denial,
+detection and evidence. It is not time travel, and any description of it that
+implies otherwise is wrong.
