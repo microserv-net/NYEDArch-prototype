@@ -912,6 +912,47 @@ pub fn strength_meter(ui: &mut Ui, width: f32, score: f32, label: &str, colour: 
 ///
 /// `engaged` is one flag per ring, `progress` runs 0..1, `working` speeds
 /// everything up.
+/// Radius of ring `i`, as a fraction of the core's half-size.
+///
+/// Shared by the drawing and the hit test so the two cannot drift. When they
+/// were separate expressions, a change to one silently moved the target away
+/// from the shape.
+pub fn ring_radius(base: f32, i: usize) -> f32 {
+    base * (0.40 + 0.13 * i as f32)
+}
+
+/// How close to a ring counts as pointing at it.
+pub const RING_BAND: f32 = 13.0;
+
+/// Which ring, if any, is under a point.
+///
+/// Extracted so it can be tested without a window. Pointer behaviour is the one
+/// thing a headless screenshot cannot exercise - a synthetic pointer does not
+/// reliably produce the motion events the toolkit reacts to - so the arithmetic
+/// is verified here instead of being taken on trust.
+///
+/// Returns the **nearest** ring, not the first one whose band contains the
+/// point.
+///
+/// Rings sit about 15 px apart and the band is 13, so bands overlap: a point
+/// can be inside two at once. "First match wins" then hands a click to the
+/// innermost ring even when the pointer is plainly closer to its neighbour -
+/// which a test caught, at 12 px from one ring and 3 px from another.
+///
+/// Nearest-wins gives every pixel to the ring it is actually closest to, so the
+/// band can stay generous without becoming ambiguous.
+pub fn ring_at(centre: Pos2, base: f32, rings: usize, p: Pos2) -> Option<usize> {
+    let d = ((p.x - centre.x).powi(2) + (p.y - centre.y).powi(2)).sqrt();
+    let mut best: Option<(usize, f32)> = None;
+    for i in 0..rings {
+        let gap = (d - ring_radius(base, i)).abs();
+        if gap < RING_BAND && best.map(|(_, b)| gap < b).unwrap_or(true) {
+            best = Some((i, gap));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 pub fn vault_core(
     ui: &mut Ui,
     size: f32,
@@ -968,16 +1009,12 @@ pub fn vault_core(
         let lock = ui.ctx().animate_bool_with_time(id, *on, 0.45);
         let e = t::ease_out_back(lock).clamp(0.0, 1.15);
 
-        let radius = base * (0.40 + 0.13 * i as f32);
+        let radius = ring_radius(base, i);
 
         // Hit test against the ring's band rather than a rectangle, so the
         // target is the shape the user can actually see.
-        let band = 13.0_f32;
         let over = hover_pos
-            .map(|m| {
-                let d = ((m.x - c.x).powi(2) + (m.y - c.y).powi(2)).sqrt();
-                (d - radius).abs() < band && rect.contains(m)
-            })
+            .map(|m| rect.contains(m) && ring_at(c, base, engaged.len(), m) == Some(i))
             .unwrap_or(false);
         if over && resp.hovered() && ui.input(|i| i.pointer.primary_clicked()) {
             clicked = Some(i);
@@ -1075,10 +1112,9 @@ pub fn vault_core(
     const RING_NAMES: [&str; 4] = ["Machine", "Passphrase", "Location", "Time window"];
     if let Some(m) = hover_pos {
         if rect.contains(m) {
-            for (i, name) in RING_NAMES.iter().enumerate() {
-                let radius = base * (0.40 + 0.13 * i as f32);
-                let d = ((m.x - c.x).powi(2) + (m.y - c.y).powi(2)).sqrt();
-                if (d - radius).abs() < 13.0 {
+            if let Some(i) = ring_at(c, base, RING_NAMES.len(), m) {
+                let name = RING_NAMES[i];
+                {
                     painter.text(
                         pos2(c.x, rect.top() + 10.0),
                         Align2::CENTER_CENTER,
@@ -1222,4 +1258,88 @@ pub fn spine(
         }
     }
     clicked
+}
+
+#[cfg(test)]
+mod ring_hit_tests {
+    use super::*;
+
+    const C: Pos2 = Pos2 { x: 200.0, y: 300.0 };
+    const BASE: f32 = 118.0;
+
+    /// Pointing exactly at a ring selects that ring.
+    #[test]
+    fn each_ring_is_selectable_at_its_own_radius() {
+        for i in 0..4 {
+            let r = ring_radius(BASE, i);
+            // Four directions, because the arithmetic is radial and a bug in
+            // one axis would pass if only one direction were checked.
+            for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let p = pos2(C.x + r * dx, C.y + r * dy);
+                assert_eq!(
+                    ring_at(C, BASE, 4, p),
+                    Some(i),
+                    "ring {i} should be selectable at ({dx}, {dy})"
+                );
+            }
+        }
+    }
+
+    /// The centre and the outside are not rings.
+    ///
+    /// The core is the seal, not a protection, and clicking past the outermost
+    /// ring means "none of them" rather than "the last one".
+    #[test]
+    fn the_core_and_the_outside_select_nothing() {
+        assert_eq!(ring_at(C, BASE, 4, C), None, "the core is not a ring");
+        let far = pos2(C.x + ring_radius(BASE, 3) + RING_BAND * 3.0, C.y);
+        assert_eq!(ring_at(C, BASE, 4, far), None, "outside every band");
+    }
+
+    /// Every point between two rings goes to the nearer one.
+    ///
+    /// The bands genuinely overlap - about 15 px of spacing against a 13 px
+    /// band - so this is the property that makes a generous target unambiguous.
+    /// Sweeping the whole span between two rings is worth more than asserting a
+    /// spacing number, because it fails if either constant moves.
+    #[test]
+    fn the_nearer_ring_always_wins() {
+        for i in 0..3 {
+            let r0 = ring_radius(BASE, i);
+            let r1 = ring_radius(BASE, i + 1);
+            let mid = (r0 + r1) * 0.5;
+            let mut d = r0;
+            while d < r1 {
+                let got = ring_at(C, BASE, 4, pos2(C.x + d, C.y));
+                let expected = if d < mid { i } else { i + 1 };
+                assert_eq!(
+                    got,
+                    Some(expected),
+                    "at {d} px, between rings {i} and {}, the nearer is {expected}",
+                    i + 1
+                );
+                d += 0.5;
+            }
+        }
+    }
+
+    /// Within a band but not on the line still counts: a ring is thin, and
+    /// requiring a pixel-exact hit would make it unusable.
+    #[test]
+    fn the_band_is_forgiving_in_both_directions() {
+        // Half the spacing: beyond that the neighbour is genuinely closer, and
+        // giving the click to it is correct rather than a miss.
+        let r = ring_radius(BASE, 1);
+        let half_gap = (ring_radius(BASE, 2) - r) * 0.5;
+        for offset in [-half_gap + 0.5, -4.0, 0.0, 4.0, half_gap - 0.5] {
+            assert_eq!(
+                ring_at(C, BASE, 4, pos2(C.x + r + offset, C.y)),
+                Some(1),
+                "offset {offset} should still hit ring 1"
+            );
+        }
+        // Past the midpoint the neighbour wins, which is the intended answer.
+        let beyond = ring_at(C, BASE, 4, pos2(C.x + r + half_gap + 1.0, C.y));
+        assert_eq!(beyond, Some(2), "past the midpoint the next ring takes it");
+    }
 }

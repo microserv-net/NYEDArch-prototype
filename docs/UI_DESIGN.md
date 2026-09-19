@@ -161,6 +161,13 @@ and the ring click are covered by their logic and by a compile, not by a picture
 They are listed here rather than left implied: a screenshot proves what it shows,
 and nothing more.
 
+Where that mattered, the logic was pulled out of the drawing code so it could be
+tested without a window: which ring a point selects is now a pure function, and
+testing it immediately found a defect no screenshot would have shown — the ring
+bands overlap, and "first match wins" handed a click to the innermost ring even
+when the pointer was four times closer to its neighbour. The nearer ring wins
+now, and a test sweeps every half-pixel between rings to prove it.
+
 ## Accessibility notes
 
 - Meaning is never carried by colour alone: engaged protections also show a
