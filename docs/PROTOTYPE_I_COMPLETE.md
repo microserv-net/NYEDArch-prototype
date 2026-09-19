@@ -41,6 +41,26 @@ and for a different reason. See `CASE_STUDIES.md` CS-01.
 | Clients | CLI and desktop at full parity through one shared pipeline |
 | Key storage | Platform keystore with a disclosed fallback; lock-serialised initialisation |
 
+## Measured, not estimated
+
+Figures below come from runs on this project's CI and development machines. No
+number here is projected, and none is included because it looks good.
+
+| Measurement | Value | Where it comes from |
+|---|---|---|
+| Argon2id, m=64 MiB t=2 p=1 | ~70 ms | `--with-logs` on a sealing run |
+| Fingerprint capture | ~40 µs | same |
+| Seal, small payload | ~92 µs | same |
+| Remote build, three targets | ~90 s | e2e workflow, wait to artifact |
+| Capsule size, trivial payload | ~760 KB | staged Linux capsule |
+
+Argon2id dominates, by roughly three orders of magnitude, and that is the
+intended shape: it is the only step deliberately made expensive, and it is
+expensive exactly where an attacker must repeat it.
+
+Anything not measured is absent rather than guessed. There are no graphs,
+because five numbers do not need one.
+
 ## The delivery path, proven end to end
 
 Every earlier claim that a capsule could be built and delivered was made without
