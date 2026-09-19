@@ -537,7 +537,41 @@ impl App {
     /// Nothing here is simulated: this is the same `seal_and_generate` the
     /// command-line client runs, and the progress bar advances only when the
     /// pipeline reports a stage.
+    /// Begin a build, refusing anything the pipeline would refuse.
+    ///
+    /// The enabled state of a button is not a guard. Until now it was the only
+    /// one: `ready_to_build` decided whether the control could be pressed, and
+    /// this function trusted that it had been. Two callers already exist, the
+    /// spine lets someone reach the Build stage from anywhere, and a third
+    /// caller added later would inherit no check at all.
+    ///
+    /// So the conditions are enforced where the work starts, not where it is
+    /// offered. This is the same reasoning the capsule follows: a branch that
+    /// merely hides an action is not what makes the action impossible.
     fn start_build(&mut self, now: f64) {
+        if self.building {
+            return;
+        }
+        if self.source_path.trim().is_empty() {
+            self.say(now, "Nothing selected to protect.");
+            self.toast(now, "Choose a source first", t::ROSE);
+            self.goto(Step::Source, now);
+            return;
+        }
+        if !self.passphrase_acceptable() {
+            let (_, why, _) = w::passphrase_strength(&self.passphrase);
+            self.say(now, format!("Passphrase refused: {why}"));
+            self.toast(now, "Passphrase too weak", t::ROSE);
+            self.goto(Step::Protections, now);
+            return;
+        }
+        if !(self.target_windows || self.target_macos || self.target_linux) {
+            self.say(now, "No build target selected.");
+            self.toast(now, "Choose a platform", t::ROSE);
+            self.goto(Step::Targets, now);
+            return;
+        }
+
         if self.building {
             return;
         }
@@ -2449,6 +2483,37 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("NYEDArch", opts, Box::new(|_cc| Box::<App>::default()))
+}
+
+#[cfg(test)]
+mod guard_tests {
+    /// The work must refuse what the button merely hides.
+    ///
+    /// `ready_to_build` decides whether the control can be pressed. It was the
+    /// only check, and the spine now lets someone reach the Build stage from
+    /// anywhere, so the conditions are enforced where the work starts too. This
+    /// pins that, because the failure mode is silent: a future caller inherits
+    /// no check and nothing looks wrong.
+    #[test]
+    fn start_build_checks_its_own_preconditions() {
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn start_build(&mut self, now: f64) {")
+            .nth(1)
+            .expect("start_build exists");
+        // Only the opening of the function matters: the guards come first.
+        let head = &body[..body.len().min(1400)];
+        for required in [
+            "self.source_path.trim().is_empty()",
+            "!self.passphrase_acceptable()",
+            "self.target_windows || self.target_macos || self.target_linux",
+        ] {
+            assert!(
+                head.contains(required),
+                "start_build must check `{required}` itself, not rely on the button"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
