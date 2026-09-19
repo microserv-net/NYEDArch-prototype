@@ -41,8 +41,8 @@ Two rules apply to every item:
 | A9 | ~~**Structured test-case format**~~ **DONE** — `CASE_STUDIES.md` Part 1 | 18 fields: Test ID, Category, Scenario, Setup, Preconditions, Action, Intended, Acceptance, Observed, Artifact State, Telemetry, Notification, Plaintext Exposure, Timing, Resources, Platform, Evidence, Status, Interpretation. |
 | A10 | ~~**Metrics and graphs**~~ **DONE** — `PROTOTYPE_I_COMPLETE.md` "Measured, not estimated"; measured figures only, no graphs | Only where real measurements exist. No decorative charts, no manufactured numbers. |
 | A11 | ~~**Post-compromise lifecycle**~~ **DONE** — same document | Prototype-II. Keep detection, notification, audit preservation, revocation and lawful investigation as separate concepts. State plainly: extracted plaintext cannot be recalled. |
-| A12 | **Hostile to threats, humane to legitimate users** | Extreme restriction for suspicious activity; extreme specificity for verified recovery. |
-| A13 | ~~**Hostile to threats, humane to legitimate users**~~ **DONE** — `license-server/NYEDARCH_LICENSE_AND_ENTITLEMENTS.md` | *From software that protects data, to software that lets data protect itself.* The expanded security material must not turn NYEDArch into conventional DRM. |
+| A12 | ~~**Hostile to threats, humane to legitimate users**~~ **DONE** — `license-server/NYEDARCH_LICENSE_AND_ENTITLEMENTS.md` | Extreme restriction for suspicious activity; extreme specificity for verified recovery. |
+| A13 | ~~**Preserve the central philosophy**~~ **DONE** — `PHILOSOPHY.md` | *From software that protects data, to software that lets data protect itself.* The expanded security material must not turn NYEDArch into conventional DRM. |
 | A14 | ~~**Preserve the central philosophy**~~ **DONE** — `PHILOSOPHY.md` | Test counts and their arithmetic, weakness counts, section numbering, cross-references, status labels, terminology, benchmark figures. No contradictions about what is implemented. |
 
 ## B. Test and research programmes
