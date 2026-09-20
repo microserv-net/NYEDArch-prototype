@@ -16,6 +16,7 @@ path = "src/main.rs"
 nyedarch-crypto = { path = "../nyedarch-crypto" }
 nyedarch-core = { path = "../nyedarch-core" }
 nyedarch-github = { path = "../nyedarch-github" }
+nyedarch-runtime = { path = "../nyedarch-runtime" }
 nyedarch-package = { path = "../nyedarch-package", features = ["builder"] }
 nyedarch-fingerprint = { path = "../nyedarch-fingerprint" }
 nyedarch-platform = { path = "../nyedarch-platform" }

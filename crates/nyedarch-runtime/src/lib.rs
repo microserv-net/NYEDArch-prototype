@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub mod destruction;
 pub mod harden;
+pub mod selfseal;
 pub mod location;
 pub use location::SystemLocation;
 

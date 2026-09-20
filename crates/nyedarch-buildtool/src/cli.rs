@@ -125,6 +125,15 @@ The capsule authorizes itself. This client grants it nothing and never sees its
 passphrase.")]
     Run(RunArgs),
 
+    /// Write the self-seal digest into a compiled capsule.
+    ///
+    /// Run after `cargo build` and before delivery. A capsule without this
+    /// still runs; it simply cannot detect modification of its own image.
+    Selfseal {
+        /// The compiled capsule binary to seal in place.
+        binary: std::path::PathBuf,
+    },
+
     /// Measure this machine: fingerprinting, key derivation, compression.
     Bench,
 }

@@ -221,7 +221,6 @@ nyedarch-crypto  = {{ path = "vendor/nyedarch-crypto" }}
     let main_rs = format!(
         r#"// GENERATED per-build NYEDArch runtime — build nonce {div:016x}.
 // This file is assembled by the generator, not shipped as a plaintext template.
-use std::io::Read;
 use std::path::PathBuf;
 use nyedarch_runtime::{{run, one_shot_destroy, Capsule, LocalTime, LocationProvider, Outcome, PassphraseProvider}};
 {conditional_imports}use zeroize::Zeroizing;
@@ -232,6 +231,25 @@ const BOOTSTRAP_KEY: [u8; 32] = [{boot}];
 // against the package header AND mixed into the policy-seal subkey, so another
 // runtime cannot open this package's authorization record.
 const RUNTIME_COMMITMENT: [u8; 32] = [{commit}];
+
+/// Reserved for the self-seal digest, written after compilation.
+///
+/// `#[used]` and `#[no_mangle]` keep the linker from discarding a static that
+/// nothing appears to read - it is read by scanning the file, not by name, so
+/// without these the optimiser is entitled to remove it and the seal would
+/// silently never apply.
+#[used]
+#[no_mangle]
+pub static NYEDARCH_SELF_SEAL: [u8; 48] = {{
+    let mut f = [0u8; 48];
+    let m = *b"NYEDARCH-SEALv1\0";
+    let mut i = 0;
+    while i < 16 {{
+        f[i] = m[i];
+        i += 1;
+    }}
+    f
+}};
 const BUILD_NONCE: u64 = 0x{div:016x};
 const ONE_SHOT: bool = {one_shot};
 
@@ -305,6 +323,23 @@ impl PassphraseProvider for StdinPass {{
 }}
 
 fn main() {{
+    // Has this binary been modified since it was built?
+    //
+    // Not the confidentiality boundary - the payload key comes from the
+    // authorization factors, so patching a branch yields nothing either way.
+    // This is detection: an attacker who edits the image fails closed and
+    // spends a specimen rather than getting a free iteration.
+    //
+    // An unsealed binary still runs. If the post-build step did not apply a
+    // digest, refusing here would turn a missing defence-in-depth layer into
+    // total loss of access, which is a worse outcome than the weaker capsule.
+    match nyedarch_runtime::selfseal::check_self() {{
+        nyedarch_runtime::selfseal::SelfSeal::Modified => {{
+            eprintln!("Authorization failed.");
+            std::process::exit(1);
+        }}
+        _ => {{}}
+    }}
     let _ = BUILD_NONCE;
     let out = std::env::args().nth(1).map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("./nyeda-extracted"));
@@ -369,6 +404,15 @@ fn main() {{
 # Stage the compiled capsule as a NYEDArch capsule (.{ext}).
 set -e
 cargo build --release
+
+# Write the self-seal digest into the compiled binary.
+#
+# A binary cannot contain a hash of itself, so the digest field is zeroed,
+# the image is hashed, and the result is written into the field. Without this
+# step the capsule still runs - it simply reports itself unsealed.
+if command -v nyedarch-buildtool > /dev/null 2>&1; then
+  nyedarch-buildtool selfseal target/release/nyedarch-capsule 2>/dev/null || true
+fi
 bin="target/release/nyedarch-capsule"
 [ -f "$bin.exe" ] && bin="$bin.exe"
 out="nyedarch-{div:016x}.{ext}"

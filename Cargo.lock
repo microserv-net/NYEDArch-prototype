@@ -961,6 +961,7 @@ dependencies = [
  "nyedarch-github",
  "nyedarch-package",
  "nyedarch-platform",
+ "nyedarch-runtime",
  "serde",
  "sha2",
  "zeroize",

@@ -17,6 +17,13 @@ use std::path::{Path, PathBuf};
 use nyedarch_crypto::Argon2Params;
 
 
+/// Report and stop. Sealing failures are build failures: a capsule that was
+/// meant to be sealed and is not should not ship quietly.
+fn fail(message: &str) -> ! {
+    eprintln!("error: {message}");
+    std::process::exit(3)
+}
+
 fn main() {
     use clap::Parser;
     use nyedarch_buildtool::cli::{Cli, Command, MachinesAction};
@@ -85,6 +92,47 @@ fn main() {
             if let Some(o) = &a.output { v.push(o.to_string_lossy().to_string()); }
             v
         }
+        Command::Selfseal { binary } => {
+            let image = match std::fs::read(&binary) {
+                Ok(b) => b,
+                Err(e) => fail(&format!("cannot read {}: {e}", binary.display())),
+            };
+            match nyedarch_runtime::selfseal::seal_image(&image) {
+                Some(sealed) => {
+                    // Written to a temporary file and renamed, so an
+                    // interrupted seal cannot leave a half-written binary that
+                    // neither runs nor verifies.
+                    let tmp = binary.with_extension("sealing");
+                    if let Err(e) = std::fs::write(&tmp, &sealed) {
+                        fail(&format!("cannot write the sealed image: {e}"));
+                    }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+                    }
+                    if let Err(e) = std::fs::rename(&tmp, &binary) {
+                        fail(&format!("cannot replace the binary: {e}"));
+                    }
+                    // Verify what was written, rather than trusting that
+                    // writing it worked. A seal that does not verify is worse
+                    // than none: the capsule would refuse its own owner.
+                    if nyedarch_runtime::selfseal::check_image(&sealed)
+                        != nyedarch_runtime::selfseal::SelfSeal::Intact
+                    {
+                        fail("the seal did not verify after writing it");
+                    }
+                    println!("[nyedarch] sealed {}", binary.display());
+                    // Sealing is a terminal operation: it does not feed the
+                    // argv translation the other commands build, so it ends
+                    // here rather than returning an empty vector that a later
+                    // stage would try to run.
+                    std::process::exit(0);
+                }
+                None => fail("no self-seal field in that binary; it was not built by this client"),
+            }
+        }
+
         Command::Bench => vec!["nyedarch".into(), "bench".into()],
         Command::Machines { action } => {
             let mut v = vec!["nyedarch".into(), "machines".into()];

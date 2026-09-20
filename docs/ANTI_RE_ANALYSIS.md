@@ -182,7 +182,7 @@ comparisons against it never appear.
 confidentiality boundary is the composed key, as everywhere else in this
 document.
 
-### 5c. The capsule does not verify its own executable image — KNOWN LIMITATION
+### 5c. Self-image integrity — IMPLEMENTED AND TESTED
 
 Found by attacking a delivered capsule rather than by review.
 
@@ -205,10 +205,37 @@ Today it verifies the package it carries, not the image it runs as. An attacker
 who patches the binary gains nothing cryptographically, but they also are not
 detected doing it, and they can iterate without consuming the specimen.
 
-Closing this needs a post-build step: compile, compute a hash of the image with
-a placeholder field zeroed, write the hash into that field, and have the runtime
-recompute and compare. It is implementable and it is **not implemented**, so it
-is recorded here as a known limitation rather than described as a design.
+**Now closed.** The capsule reserves a 48-byte field: a magic prefix and a
+32-byte digest. After compilation `nyedarch-buildtool selfseal` zeroes the
+digest field, hashes the image, and writes the result back. At start-up the
+runtime does the same in reverse and compares. Verified against a real capsule:
+a byte flipped anywhere in the image is now refused.
+
+Three things were worth getting right:
+
+**A binary cannot hash itself.** Zeroing the field before hashing, on both
+sides, is what makes the two agree.
+
+**The field is found by scanning, not by a recorded offset.** The linker decides
+where static data lands; an offset computed at build time is a promise about
+layout nobody made.
+
+**An unsealed capsule still runs.** If the post-build step did not run, the
+digest is zero and the check reports "not sealed". Refusing there would turn a
+skipped build step into total loss of access — a missing defence-in-depth layer
+is a weaker capsule, a false positive is a destroyed one.
+
+That last point was not theoretical. The first implementation stored the magic
+as a literal, which put a *second* copy in the image — the library's own
+constant — and the scanner found that one, read the unrelated bytes after it as
+a digest, and refused every unsealed capsule. The magic is now rebuilt at run
+time from masked bytes, and every candidate field is considered rather than the
+first: intact if any verifies, unsealed if any is still zeroed, modified only
+when neither holds.
+
+**It is still not the confidentiality boundary.** A patched branch yields no key
+material either way. What this adds is detection: an attacker who edits the
+image fails closed and spends a specimen instead of getting a free iteration.
 
 ## 6. Memory hygiene limits
 

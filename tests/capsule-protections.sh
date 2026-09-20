@@ -125,6 +125,35 @@ else
   bad "could not locate the sealed package inside the capsule"
 fi
 
+echo "== self-seal: the image must detect modification of itself =="
+# Sealing writes a digest of the image, with the digest field zeroed, into that
+# field. Before this existed, editing the binary outside the sealed package went
+# unnoticed - the capsule verified what it carried, not what it ran as.
+CAP_S=$(seal "$WORK/p-seal")
+if "$B" selfseal "$CAP_S" > /dev/null 2>&1; then
+  [ "$(run "$CAP_S" "$WORK/o-seal")" -ge 2 ] \
+    && ok "a sealed capsule still opens for its owner" \
+    || bad "sealing broke a capsule for its legitimate owner"
+
+  SZ=$(stat -c%s "$CAP_S" 2>/dev/null || stat -f%z "$CAP_S")
+  missed=0
+  for frac in 3 2; do
+    off=$((SZ/frac))
+    cp "$CAP_S" "$WORK/imgtamper.nyarch"
+    printf '\x41' | dd of="$WORK/imgtamper.nyarch" bs=1 seek="$off" count=1 conv=notrunc 2>/dev/null
+    chmod +x "$WORK/imgtamper.nyarch"
+    n=$(run "$WORK/imgtamper.nyarch" "$WORK/o-img-$frac")
+    if [ "$n" != "0" ] || ! no_plaintext "$WORK/o-img-$frac"; then
+      missed=$((missed+1))
+    fi
+  done
+  [ "$missed" = "0" ] \
+    && ok "a modified image is refused" \
+    || bad "$missed image edit(s) went undetected by the self-seal"
+else
+  bad "selfseal failed on a freshly built capsule"
+fi
+
 echo "== binding =="
 # A payload must not be transplantable into another capsule. Two capsules built
 # from the same source have different keys and bindings, so swapping the sealed
