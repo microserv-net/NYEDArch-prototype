@@ -182,6 +182,34 @@ comparisons against it never appear.
 confidentiality boundary is the composed key, as everywhere else in this
 document.
 
+### 5c. The capsule does not verify its own executable image — KNOWN LIMITATION
+
+Found by attacking a delivered capsule rather than by review.
+
+Flipping a byte in the **sealed package** region is refused every time: that
+region is authenticated, and the suite proves it at three offsets. Flipping a
+byte elsewhere in the binary — in code or padding the run does not depend on —
+goes **unnoticed**, and the capsule opens normally for its legitimate owner.
+
+Two things are true here and neither should be overstated.
+
+**The confidentiality boundary is intact.** An inert edit does not yield
+plaintext, and a meaningful one cannot either: the payload key is composed from
+the authorization factors, so patching a branch changes control flow without
+producing key material. The capsule in that test opened because the correct
+passphrase was supplied on the correct machine — it was not a bypass.
+
+**The anti-tamper layer is weaker than §30 asks for.** The specification wants a
+generated executable that detects modification of itself, as defence in depth.
+Today it verifies the package it carries, not the image it runs as. An attacker
+who patches the binary gains nothing cryptographically, but they also are not
+detected doing it, and they can iterate without consuming the specimen.
+
+Closing this needs a post-build step: compile, compute a hash of the image with
+a placeholder field zeroed, write the hash into that field, and have the runtime
+recompute and compare. It is implementable and it is **not implemented**, so it
+is recorded here as a known limitation rather than described as a design.
+
 ## 6. Memory hygiene limits
 
 `Zeroizing` clears buffers on drop and minimises secret lifetime. It does **not**

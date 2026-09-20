@@ -89,6 +89,28 @@ jobs:
             exit "$code"
           fi
 
+  protections:
+    name: capsule enforces its protections
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: protections
+
+      # Component tests do not answer the question a user actually has: does the
+      # capsule I was handed enforce what it promised? This builds real capsules
+      # and attacks them - wrong passphrase, a different machine, outside the
+      # time window, an edited package, a transplanted payload - and checks that
+      # each is refused and leaves nothing behind.
+      - name: Build the client
+        run: cargo build --release -p nyedarch-buildtool
+
+      - name: Attack the delivered capsules
+        run: bash tests/capsule-protections.sh ./target/release/nyedarch-buildtool
+
   desktop:
     name: desktop client
     runs-on: ubuntu-latest
