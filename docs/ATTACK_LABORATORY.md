@@ -1,6 +1,6 @@
 # Attack laboratory
 
-**Status: IMPLEMENTED AND TESTED** — 12 executed attacks, item B2 in
+**Status: IMPLEMENTED AND TESTED** — 13 executed attacks, item B2 in
 `PENDING_DOCUMENTATION_WORK.md`.
 
 Every attack here is **executed**, not proposed. Each takes a genuinely sealed

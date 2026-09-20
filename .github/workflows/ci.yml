@@ -37,7 +37,22 @@ jobs:
           key: ${{ matrix.os }}
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        shell: bash
+        run: |
+          # Compiler errors as annotations.
+          #
+          # rustc output lives in the job log, which needs GitHub's storage
+          # host - unreachable from some networks. A bare "exit code 101" is not
+          # a diagnosis, and guessing at one wastes a full CI cycle.
+          set +e
+          cargo build --workspace --all-targets 2>&1 | tee /tmp/build.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            grep -E "^(error|warning)" -A4 /tmp/build.txt | head -40 | while IFS= read -r line; do
+              echo "::error::rustc: ${line}"
+            done
+            exit "$code"
+          fi
 
       # Warnings are failures here. A generated capsule is compiled in a log the
       # public can read when the build repository is public, and a warning is
@@ -57,7 +72,100 @@ jobs:
           fi
 
       - name: Test
-        run: cargo test --workspace
+        shell: bash
+        run: |
+          # Failures as annotations, for the same reason the build step does it:
+          # the job log needs GitHub's storage host, unreachable from some
+          # networks, and "exit code 1" is not a diagnosis. A Windows-only test
+          # failure cost a full cycle to identify for exactly this reason.
+          set +e
+          cargo test --workspace 2>&1 | tee /tmp/test.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            grep -E "(FAILED|^failures:|panicked|assertion)" -A3 /tmp/test.txt \
+              | head -40 | while IFS= read -r line; do
+              echo "::error::test: ${line}"
+            done
+            exit "$code"
+          fi
+
+  protections:
+    name: capsule enforces its protections
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: protections
+
+      # Component tests do not answer the question a user actually has: does the
+      # capsule I was handed enforce what it promised? This builds real capsules
+      # and attacks them - wrong passphrase, a different machine, outside the
+      # time window, an edited package, a transplanted payload - and checks that
+      # each is refused and leaves nothing behind.
+      - name: Build the client
+        run: cargo build --release -p nyedarch-buildtool
+
+      - name: Attack the delivered capsules
+        run: bash tests/capsule-protections.sh ./target/release/nyedarch-buildtool
+
+  desktop:
+    name: desktop client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui
+
+      # The desktop client is a separate cargo workspace, so `cargo build
+      # --workspace` at the repository root never touched it. Toolchain warnings
+      # accumulated there unseen for weeks, and a compile break would have
+      # reached a release before anyone noticed.
+      - name: System libraries the client links against
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev
+
+      - name: Build the desktop client
+        working-directory: gui/nyedarch-gui
+        shell: bash
+        run: |
+          set +e
+          cargo build 2>&1 | tee /tmp/gui.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" != "0" ]; then
+            grep -E "^(error|warning)" -A4 /tmp/gui.txt | head -40 | while IFS= read -r line; do
+              echo "::error::gui: ${line}"
+            done
+            exit "$code"
+          fi
+
+      # Warnings are failures here for the same reason they are in the
+      # workspace: the client is shipped, and a warning is a defect nobody has
+      # looked at yet.
+      # The client has tests of its own now - drop routing, and whatever
+      # follows. Building without running them proves only that it compiles.
+      - name: Test the desktop client
+        working-directory: gui/nyedarch-gui
+        run: cargo test
+
+      - name: The client must build clean
+        shell: bash
+        run: |
+          n=$(grep -c '^warning' /tmp/gui.txt || true)
+          if [ "$n" != "0" ]; then
+            echo "::error::the desktop client produced $n warning(s)"
+            grep -A4 '^warning' /tmp/gui.txt | head -40 | while IFS= read -r line; do
+              echo "::error::gui: ${line}"
+            done
+            exit 1
+          fi
 
   capsule:
     name: end-to-end capsule (${{ matrix.os }})

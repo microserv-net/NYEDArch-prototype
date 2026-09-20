@@ -83,6 +83,13 @@ pub struct Orchestrator<'a, T: Transport, S: SecretSealer> {
     /// The downloaded artifact, kept so the caller can write it out after the
     /// provenance check has passed.
     pub last_artifact: Option<Vec<u8>>,
+    /// What the artifact step actually saw: how many artifacts, which was
+    /// chosen, what the download returned. Reported by the caller.
+    ///
+    /// Without this, "no artifact was retrieved" covers an empty listing, an
+    /// unmatched name and a failed download equally - three different problems
+    /// behind one sentence, which is why they took three rounds to separate.
+    pub last_fetch_note: String,
     /// How many times to poll for run completion before giving up.
     pub max_wait_polls: u32,
     /// Seconds between polls.
@@ -100,6 +107,7 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
             sealer,
             build_running: false,
             last_artifact: None,
+            last_fetch_note: String::new(),
             // ~20 minutes: long enough for a three-target build, bounded so a
             // stuck run cannot hang the client forever.
             max_wait_polls: 80,
@@ -277,12 +285,13 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         // run" attaches to the previous one - the client then waits on a build
         // that already finished, reports its result, and fetches its artifacts.
         // Observed live: the wait returned instantly and no artifact appeared.
-        let previous_newest = self
+        let known_runs: std::collections::BTreeSet<u64> = self
             .transport
             .send(&ep::list_runs(&cfg.token, &cfg.owner, &cfg.repo))
             .ok()
             .filter(|r| ok(r.status))
-            .and_then(|r| newest_run_id(&r.body));
+            .map(|r| run_ids(&r.body))
+            .unwrap_or_default();
 
         let r = self.transport.send(&ep::dispatch_workflow(
             &cfg.token, &cfg.owner, &cfg.repo, "nyeda.yml", &inputs.git_ref,
@@ -298,11 +307,10 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         for _ in 0..self.max_wait_polls {
             let runs = self.transport.send(&ep::list_runs(&cfg.token, &cfg.owner, &cfg.repo))?;
             if ok(runs.status) {
-                if let Some(newest) = newest_run_id(&runs.body) {
-                    if Some(newest) != previous_newest {
-                        run_id = Some(newest);
-                        break;
-                    }
+                // The first id that was not there before dispatch.
+                if let Some(fresh) = run_ids(&runs.body).into_iter().find(|id| !known_runs.contains(id)) {
+                    run_id = Some(fresh);
+                    break;
                 }
             }
             (self.sleep)(self.poll_interval_secs);
@@ -349,7 +357,26 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         }
 
         st!(BuildState::FetchArtifact);
-        let arts = self.transport.send(&ep::list_artifacts(&cfg.token, &cfg.owner, &cfg.repo, run_id))?;
+
+        // Retry the listing.
+        //
+        // A run reports completed slightly before its artifacts are queryable,
+        // so listing immediately can return an empty set for a build that
+        // succeeded - the client then reports "no artifact was retrieved" for a
+        // capsule that exists. Observed on a real runner.
+        let mut arts = self
+            .transport
+            .send(&ep::list_artifacts(&cfg.token, &cfg.owner, &cfg.repo, run_id))?;
+        for _ in 0..10 {
+            let text = String::from_utf8_lossy(&arts.body);
+            if ok(arts.status) && text.contains("\"id\":") {
+                break;
+            }
+            (self.sleep)(3);
+            arts = self
+                .transport
+                .send(&ep::list_artifacts(&cfg.token, &cfg.owner, &cfg.repo, run_id))?;
+        }
         if !ok(arts.status) {
             self.build_running = false;
             return Err(GhError::Status(arts.status));
@@ -361,11 +388,54 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
         // earlier version only listed artifacts and left a comment saying
         // verification happened "on download" - there was no download.
         let listing = String::from_utf8_lossy(&arts.body).to_string();
-        if let Some(id) = first_artifact_id(&listing) {
+        let all = artifact_list(&listing);
+
+        // Pick the artifact for a requested target rather than whichever came
+        // first. Building for macOS and receiving a Windows binary is not a
+        // cosmetic problem: the capsule simply will not run.
+        let wanted = inputs
+            .targets
+            .iter()
+            .map(|t| t.rust_target().to_string())
+            .collect::<Vec<_>>();
+        // Prefer the host's own platform.
+        //
+        // A build usually requests every target, and only one file can be
+        // delivered. Handing over whichever artifact GitHub listed first gave a
+        // Windows binary to someone on macOS - it downloads, it saves, and it
+        // cannot run. The capsule a user can actually open is the one for the
+        // machine they are sitting at.
+        let host = if cfg!(target_os = "windows") {
+            "x86_64-pc-windows-msvc"
+        } else if cfg!(target_os = "macos") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        let chosen = all
+            .iter()
+            .find(|(_, name)| name.contains(host) && wanted.iter().any(|w| name.contains(w.as_str())))
+            .or_else(|| all.iter().find(|(_, name)| wanted.iter().any(|w| name.contains(w.as_str()))))
+            .or_else(|| all.first())
+            .map(|(id, name)| (*id, name.clone()));
+
+        self.last_fetch_note = format!(
+            "artifacts listed: {} [{}]; wanted host or {:?}",
+            all.len(),
+            all.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(", "),
+            wanted
+        );
+
+        if let Some((id, name)) = chosen {
+            self.last_fetch_note.push_str(&format!("; chose {name} (id {id})"));
             let blob = self
                 .transport
                 .send(&ep::download_artifact(&cfg.token, &cfg.owner, &cfg.repo, id))?;
+            self.last_fetch_note
+                .push_str(&format!("; download status {}", blob.status));
             if ok(blob.status) {
+                self.last_fetch_note
+                    .push_str(&format!("; {} bytes", blob.body.len()));
                 self.last_artifact = Some(blob.body.clone());
                 // Retrieved and verified, so the remote copy is no longer
                 // needed. It is the capsule binary itself, and on a public
@@ -391,22 +461,82 @@ impl<'a, T: Transport, S: SecretSealer> Orchestrator<'a, T, S> {
     }
 }
 
-/// The newest run id in a runs listing. GitHub returns them most-recent first.
-fn newest_run_id(body: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(body);
-    let i = text.find("\"id\":")? + 5;
-    let rest = text[i..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit())?;
-    rest[..end].parse().ok()
+/// Every `(id, name)` pair in an artifacts listing.
+///
+/// The listing is ordered by GitHub, not by us, so taking the first entry
+/// delivers whichever target happens to be listed first - a Windows binary to
+/// someone who asked for macOS. Callers pick by name instead.
+fn artifact_list(text: &str) -> Vec<(u64, String)> {
+    // Pair each artifact name with the id that *precedes* it in its own object.
+    //
+    // GitHub orders an artifact object as {"id":…,"node_id":…,"name":…,…,
+    // "workflow_run":{"id":…}}. Walking forward from every "id" and taking the
+    // next "name" therefore paired the nested workflow_run id with the *next*
+    // artifact's name - which is why a three-artifact run listed five, and why
+    // the chosen "artifact id" was the run id. Downloading that returns 404.
+    //
+    // Searching backwards from the name finds the id that opens the same
+    // object, and the nested run id sits after the name, so it is never picked.
+    let mut out = Vec::new();
+    let needle = "\"name\":\"nyedarch-capsule";
+    let mut from = 0usize;
+    while let Some(rel) = text[from..].find(needle) {
+        let at = from + rel;
+        let name = text[at + 8..]
+            .split('"')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if let Some(idx) = text[..at].rfind("\"id\":") {
+            let digits: String = text[idx + 5..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                out.push((id, name));
+            }
+        }
+        from = at + needle.len();
+    }
+    out
 }
 
-/// The first artifact id in a listing response.
-fn first_artifact_id(text: &str) -> Option<u64> {
-    let i = text.find("\"id\":")? + 5;
-    let rest = text[i..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit())?;
-    rest[..end].parse().ok()
+/// Every run id in a runs listing.
+///
+/// The client used to remember only the *newest* id and wait for a different
+/// one. That breaks in two ways, and both were observed: if the listing call
+/// fails there is nothing to compare against, and if the new run has not
+/// registered yet the newest id is still an old one. Either way the client
+/// adopted a run that had already finished, skipped the wait entirely, and went
+/// looking for artifacts that were expired or gone - exiting in seconds with no
+/// capsule.
+///
+/// Remembering the whole set removes the ambiguity: a run is new when its id was
+/// not there before, and "the listing failed" is an empty set, which matches
+/// nothing rather than everything.
+fn run_ids(body: &[u8]) -> std::collections::BTreeSet<u64> {
+    let text = String::from_utf8_lossy(body);
+    let mut out = std::collections::BTreeSet::new();
+
+    // Only the id that opens a run object.
+    //
+    // A runs response nests a repository, an actor and a head commit, each with
+    // its own id. Collecting all of them filled the "already seen" set with
+    // numbers that are not runs - and could make an unrelated id look like a
+    // newly dispatched run.
+    for chunk in text.split("\"id\":").skip(1) {
+        let digits: String = chunk.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let Ok(id) = digits.parse::<u64>() else { continue };
+        // A run object carries these fields; a nested repository or actor does
+        // not. Checking a short window keeps this cheap.
+        let window = &chunk[..chunk.len().min(400)];
+        if window.contains("\"workflow_id\"") || window.contains("\"run_number\"") {
+            out.insert(id);
+        }
+    }
+    out
 }
+
 
 /// Does the downloaded artifact actually carry the package we sealed?
 ///
@@ -480,7 +610,7 @@ mod prune_tests {
 
 #[cfg(test)]
 mod artifact_tests {
-    use super::{artifact_carries_package, first_artifact_id};
+    use super::artifact_carries_package;
 
     /// An artifact that carries the committed package passes; one that does not
     /// is refused. GitHub is an untrusted build environment, so "the build
@@ -505,11 +635,137 @@ mod artifact_tests {
         assert!(!artifact_carries_package(b"short", &commitment));
     }
 
+    /// The artifact must be chosen by target, not by position.
+    ///
+    /// GitHub orders the listing; taking the first entry handed a Windows
+    /// binary to someone building for macOS, which simply does not run.
+    /// A run is new when its id was not present before dispatch.
+    ///
+    /// Comparing against "the newest id" adopted an already-finished run
+    /// whenever the pre-dispatch listing failed or the new run had not
+    /// registered yet - the client then skipped the wait and looked for
+    /// artifacts that were long gone.
     #[test]
-    fn the_first_artifact_id_is_extracted() {
-        let listing = r#"{"total_count":1,"artifacts":[{"id":123456789,"name":"nyedarch-capsule"}]}"#;
-        assert_eq!(first_artifact_id(listing), Some(123456789));
-        assert_eq!(first_artifact_id("{}"), None);
+    fn only_a_genuinely_new_run_is_adopted() {
+        let listing = |ids: &[u64]| {
+            let runs: Vec<String> = ids
+                .iter()
+                .map(|i| format!(r#"{{"id":{i},"run_number":1,"workflow_id":7,"repository":{{"id":42}}}}"#))
+                .collect();
+            format!(r#"{{"workflow_runs":[{}]}}"#, runs.join(",")).into_bytes()
+        };
+
+        let before = super::run_ids(&listing(&[300, 200, 100]));
+        assert_eq!(before.len(), 3, "the nested repository id must not be counted");
+        assert!(!before.contains(&42), "a repository id is not a run id");
+
+        // Nothing new yet: the client must keep waiting.
+        let same = super::run_ids(&listing(&[300, 200, 100]));
+        assert!(same.into_iter().find(|id| !before.contains(id)).is_none());
+
+        // A new run appears.
+        let after = super::run_ids(&listing(&[400, 300, 200]));
+        assert_eq!(after.into_iter().find(|id| !before.contains(id)), Some(400));
+
+        // A failed listing is an empty set, which matches nothing - so the
+        // client waits rather than adopting whatever it finds.
+        let none = super::run_ids(b"{}");
+        assert!(none.is_empty());
+    }
+
+    /// With every target requested, the host's own artifact must win.
+    ///
+    /// Only one file is delivered, and a capsule for another platform cannot be
+    /// opened by the person who asked for it.
+    #[test]
+    fn the_hosts_own_artifact_is_preferred() {
+        let listing = r#"{"artifacts":[
+          {"id":1,"name":"nyedarch-capsule-x86_64-pc-windows-msvc"},
+          {"id":2,"name":"nyedarch-capsule-aarch64-apple-darwin"},
+          {"id":3,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu"}]}"#;
+        let all = super::artifact_list(listing);
+        let host = if cfg!(target_os = "windows") {
+            "x86_64-pc-windows-msvc"
+        } else if cfg!(target_os = "macos") {
+            "aarch64-apple-darwin"
+        } else {
+            "x86_64-unknown-linux-gnu"
+        };
+        let chosen = all
+            .iter()
+            .find(|(_, n)| n.contains(host))
+            .expect("the host artifact is present in this listing");
+        assert!(
+            chosen.1.contains(host),
+            "selection must land on the host platform, not on listing order"
+        );
+    }
+
+    /// Nested objects in the response also carry an "id".
+    ///
+    /// A response contains the workflow run, the repository and the uploading
+    /// actor, each with its own id. Treating those as artifacts produced ids
+    /// that download to nothing - "no artifact was retrieved" for a build that
+    /// had produced three.
+    /// A real artifacts response, nested workflow_run and all.
+    ///
+    /// Each artifact object carries its own id before the name, and a
+    /// workflow_run object with the *run* id after it. Pairing a name with the
+    /// preceding "id" is what keeps those apart; pairing it with the following
+    /// one selected the run id, and downloading that returned 404.
+    #[test]
+    fn the_artifact_id_is_taken_from_its_own_object() {
+        let listing = r#"{"total_count":3,"artifacts":[
+          {"id":111,"node_id":"MDg6QQ==","name":"nyedarch-capsule-x86_64-pc-windows-msvc",
+           "size_in_bytes":252783,"workflow_run":{"id":999111,"repository_id":42}},
+          {"id":222,"node_id":"MDg6Qg==","name":"nyedarch-capsule-aarch64-apple-darwin",
+           "size_in_bytes":289019,"workflow_run":{"id":999111,"repository_id":42}},
+          {"id":333,"node_id":"MDg6Qw==","name":"nyedarch-capsule-x86_64-unknown-linux-gnu",
+           "size_in_bytes":366332,"workflow_run":{"id":999111,"repository_id":42}}]}"#;
+
+        let all = super::artifact_list(listing);
+        assert_eq!(all.len(), 3, "three artifacts, not one per nested id: {all:?}");
+
+        let ids: Vec<u64> = all.iter().map(|(i, _)| *i).collect();
+        assert_eq!(ids, vec![111, 222, 333]);
+        assert!(
+            !ids.contains(&999111),
+            "the workflow run id is not an artifact id"
+        );
+
+        let linux = all
+            .iter()
+            .find(|(_, n)| n.contains("x86_64-unknown-linux-gnu"))
+            .expect("the linux artifact");
+        assert_eq!(linux.0, 333, "each name must carry its own object's id");
+    }
+
+    #[test]
+    fn nested_ids_are_not_mistaken_for_artifacts() {
+        let listing = r#"{"total_count":1,"artifacts":[
+          {"id":555,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu",
+           "workflow_run":{"id":999,"repository_id":777,"head_repository_id":888}}]}"#;
+        let all = super::artifact_list(listing);
+        assert_eq!(all.len(), 1, "only the artifact itself counts: {all:?}");
+        assert_eq!(all[0].0, 555, "not the nested run or repository id");
+    }
+
+    #[test]
+    fn artifacts_are_listed_with_their_names() {
+        let listing = r#"{"total_count":3,"artifacts":[
+          {"id":1,"name":"nyedarch-capsule-x86_64-pc-windows-msvc"},
+          {"id":2,"name":"nyedarch-capsule-aarch64-apple-darwin"},
+          {"id":3,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu"}]}"#;
+        let all = super::artifact_list(listing);
+        assert_eq!(all.len(), 3);
+
+        let mac = all
+            .iter()
+            .find(|(_, n)| n.contains("aarch64-apple-darwin"))
+            .expect("the macOS artifact is findable by name");
+        assert_eq!(mac.0, 2, "selection must not depend on listing order");
+
+        assert!(super::artifact_list("{}").is_empty());
     }
 }
 

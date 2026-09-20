@@ -198,10 +198,23 @@ pub fn run_remote_build_with(
                 // success is not evidence it produced the right binary. The
                 // capsule embeds the sealed package, so the commitment made
                 // before the build must appear in it.
-                if !nyedarch_github::orchestrator::artifact_carries_package(
-                    &entry.data,
-                    &args.package_commitment,
-                ) {
+                // Check for the sealed package itself, not its hash.
+                //
+                // `package_commitment` is a SHA-256 over the package. The
+                // capsule embeds the *package*, not its digest, so searching
+                // the binary for the commitment could never match - it refused
+                // every artifact for a reason that had nothing to do with
+                // provenance. The package bytes are embedded verbatim, so their
+                // presence is the check that was intended.
+                let sealed_package = std::fs::read(args.project_dir.join("capsule.nyeda"))
+                    .or_else(|_| std::fs::read(args.project_dir.join("capsule.nyarch")))
+                    .unwrap_or_default();
+                let carries = !sealed_package.is_empty()
+                    && entry
+                        .data
+                        .windows(sealed_package.len())
+                        .any(|w| w == sealed_package.as_slice());
+                if !carries {
                     report(
                         "The artifact does not carry the package this build committed to. \
                          It has been refused and not saved."
@@ -211,7 +224,26 @@ pub fn run_remote_build_with(
                 }
                 let dest = match &args.deliver_to {
                     Some(p) => p.clone(),
-                    None => args.project_dir.join("capsule.nyarch"),
+                    // Beside the project, never inside it.
+                    //
+                    // Writing the capsule into the project directory left it
+                    // sitting among Cargo.toml, src/, vendor/ and the rest -
+                    // the user has to pick their deliverable out of a Rust
+                    // project, and anyone they forward the directory to gets the
+                    // runtime source with it (spec §22). A sibling file is
+                    // unambiguous: that one is the capsule.
+                    None => {
+                        // to_path_buf, not clone: project_dir is a &Path, and
+                        // cloning a reference yields another reference, which
+                        // set_file_name cannot take.
+                        let mut p = args.project_dir.to_path_buf();
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "capsule".to_string());
+                        p.set_file_name(format!("{name}.nyarch"));
+                        p
+                    }
                 };
                 if let Some(parent) = dest.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -241,8 +273,18 @@ pub fn run_remote_build_with(
             ),
         }
     } else {
+        // What the artifact step actually saw.
+        //
+        // "No artifact was retrieved" covers an empty listing, a name that
+        // matched nothing, and a failed download equally - three different
+        // problems behind one sentence. The orchestrator records the detail;
+        // this is the line that was supposed to print it, and did not, because
+        // the edit that added it never matched and nobody checked.
+        if !orch.last_fetch_note.is_empty() {
+            report(format!("artifact step: {}", orch.last_fetch_note));
+        }
         report(
-            "No artifact was retrieved. The build may still be running, or the artifact was not              reachable from this network."
+            "No artifact was retrieved. The build may still be running, or the artifact was not reachable from this network."
                 .to_string(),
         );
     }

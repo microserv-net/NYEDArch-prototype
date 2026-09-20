@@ -19,6 +19,8 @@ pub struct Entry {
 }
 
 const LOCAL_HEADER: u32 = 0x0403_4b50;
+const CENTRAL_HEADER: u32 = 0x0201_4b50;
+const EOCD: u32 = 0x0605_4b50;
 const STORED: u16 = 0;
 const DEFLATE: u16 = 8;
 
@@ -29,12 +31,97 @@ fn u32_at(b: &[u8], i: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?))
 }
 
+/// Extract every file, reading the **central directory**.
+///
+/// This is the only reliable way to read a GitHub artifact. Actions streams the
+/// zip as it is written, so each local header carries the "sizes follow the
+/// data" flag with zeroes where the lengths belong. Walking local headers - the
+/// obvious approach, and the first one here - stops at the first such entry and
+/// finds nothing, which is exactly what happened: the artifact downloaded
+/// correctly and then "no capsule could be read from it".
+///
+/// The central directory sits at the end and always carries real sizes and
+/// offsets, whatever the local headers say.
+fn read_central(bytes: &[u8]) -> Vec<Entry> {
+    let mut out = Vec::new();
+
+    // The end-of-central-directory record is last, possibly followed by a
+    // comment, so scan backwards for it.
+    let mut eocd = None;
+    let start = bytes.len().saturating_sub(66_000);
+    for i in (start..bytes.len().saturating_sub(21)).rev() {
+        if u32_at(bytes, i) == Some(EOCD) {
+            eocd = Some(i);
+            break;
+        }
+    }
+    let Some(eocd) = eocd else { return out };
+
+    let Some(count) = u16_at(bytes, eocd + 10) else { return out };
+    let Some(cd_off) = u32_at(bytes, eocd + 16) else { return out };
+    let mut i = cd_off as usize;
+
+    for _ in 0..count {
+        if u32_at(bytes, i) != Some(CENTRAL_HEADER) {
+            break;
+        }
+        let Some(method) = u16_at(bytes, i + 10) else { break };
+        let Some(csize) = u32_at(bytes, i + 20) else { break };
+        let Some(usize_) = u32_at(bytes, i + 24) else { break };
+        let Some(name_len) = u16_at(bytes, i + 28) else { break };
+        let Some(extra_len) = u16_at(bytes, i + 30) else { break };
+        let Some(cmt_len) = u16_at(bytes, i + 32) else { break };
+        let Some(local_off) = u32_at(bytes, i + 42) else { break };
+
+        let name_at = i + 46;
+        if name_at + name_len as usize > bytes.len() {
+            break;
+        }
+        let name =
+            String::from_utf8_lossy(&bytes[name_at..name_at + name_len as usize]).to_string();
+
+        // The data begins after the *local* header, whose name and extra fields
+        // may differ in length from the central one.
+        let lo = local_off as usize;
+        if u32_at(bytes, lo) == Some(LOCAL_HEADER) {
+            if let (Some(lname), Some(lextra)) = (u16_at(bytes, lo + 26), u16_at(bytes, lo + 28)) {
+                let data_at = lo + 30 + lname as usize + lextra as usize;
+                let end = data_at.saturating_add(csize as usize);
+                if end <= bytes.len() && !name.ends_with('/') {
+                    let raw = &bytes[data_at..end];
+                    let data = match method {
+                        STORED => Some(raw.to_vec()),
+                        DEFLATE => miniz_oxide::inflate::decompress_to_vec_with_limit(
+                            raw,
+                            (usize_ as usize).saturating_add(1024),
+                        )
+                        .ok(),
+                        _ => None,
+                    };
+                    if let Some(data) = data {
+                        out.push(Entry { name, data });
+                    }
+                }
+            }
+        }
+        i = name_at + name_len as usize + extra_len as usize + cmt_len as usize;
+    }
+    out
+}
+
 /// Extract every file an artifact contains.
 ///
 /// Directory entries are skipped. Returns an empty vector rather than an error
 /// for an archive it cannot read: the caller decides what a missing capsule
 /// means, and it is never "carry on as though it worked".
 pub fn read_all(bytes: &[u8]) -> Vec<Entry> {
+    // The central directory first: it is authoritative, and it is the only
+    // thing that works for a streamed archive.
+    let central = read_central(bytes);
+    if !central.is_empty() {
+        return central;
+    }
+
     let mut out = Vec::new();
     let mut i = 0usize;
 

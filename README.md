@@ -4,7 +4,7 @@ Transforms passive data into an active, self-protecting executable capsule that
 carries its own protected data, authorization policy, decryption logic, and
 hostile-environment defenses.
 
-**Status: Prototype-I COMPLETE.** 162 tests passing, zero warnings, on Rust 1.91.1.
+**Status: Prototype-I COMPLETE.** the full suite passing on Linux, macOS and Windows, plus an end-to-end remote delivery test on every push, zero warnings, on Rust 1.91.1.
 Verified on real Linux, macOS and Windows runners. See `docs/PROTOTYPE_I_COMPLETE.md`.
 
 Implementation is closed: from here Prototype-I changes only for interface work.
@@ -153,7 +153,7 @@ Every platform path now runs on a real runner, not just a compiler:
 | `docs/ANTI_RE_ANALYSIS.md` | Anti-tamper and anti-analysis, with limits stated |
 | `docs/PROTOTYPE_I_COMPLETE.md` | What was delivered, what was deliberately left out, and the weaknesses carried forward |
 | `docs/CI_TESTING_METHOD.md` | How platform code was verified on hosted runners without publishing source |
-| `docs/decisions/` | 12 architecture decision records |
+| `docs/decisions/` | 13 architecture decision records |
 
 ## Known limitations
 

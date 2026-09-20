@@ -118,29 +118,132 @@ fn keystore_store(key: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// Windows DPAPI is currently **disabled**.
+/// Windows DPAPI, via the .NET `ProtectedData` API.
 ///
-/// The PowerShell `ConvertTo-SecureString` / `ConvertFrom-SecureString` round
-/// trip did not reproduce reliably on a real Windows runner: a store would
-/// report success and a later load would return nothing, so every run minted a
-/// fresh key and every record signed by a previous run became unverifiable.
-/// Three keystore tests failed there while passing everywhere else.
+/// The first attempt used PowerShell's `ConvertTo-SecureString` /
+/// `ConvertFrom-SecureString` pair. That round trip did not reproduce on a real
+/// runner: a store reported success and a later load returned nothing, so every
+/// run minted a fresh key and every previously signed record became
+/// unverifiable. Those cmdlets carry SecureString and console-encoding
+/// behaviour that is not worth fighting for a 32-byte secret.
 ///
-/// An unreliable keystore is worse than an honest file: the file is stable, the
-/// degradation is reported to the operator at startup, and no record is
-/// silently invalidated. Windows therefore uses the restricted file until the
-/// DPAPI path can be made deterministic and verified on real hardware.
+/// `ProtectedData::Protect` is the primitive underneath, and it takes and
+/// returns plain bytes. The ciphertext is stored base64-encoded, and the secret
+/// travels on **stdin** in both directions - never in a command line, where any
+/// other user on the machine can read it from the process list.
 ///
-/// Tracked as an open item. A stable key with a disclosed weakness beats a
-/// stronger store that loses data.
+/// Whether this works is not asserted here: `master_key` reads back what it
+/// stored and falls through to the restricted file if the value does not come
+/// back identical. A keystore that cannot return what it was given is not
+/// trusted, whatever its documentation claims.
 #[cfg(target_os = "windows")]
-fn keystore_load() -> Option<Vec<u8>> {
-    None
+fn dpapi_path() -> std::path::PathBuf {
+    fallback_path().with_extension("dpapi")
 }
 
 #[cfg(target_os = "windows")]
-fn keystore_store(_key: &[u8]) -> bool {
-    false
+fn keystore_store(key: &[u8]) -> bool {
+    use std::io::Write;
+    let path = dpapi_path();
+    if let Some(d) = path.parent() {
+        if std::fs::create_dir_all(d).is_err() {
+            return false;
+        }
+    }
+    let script = format!(
+        "Add-Type -AssemblyName System.Security;          $b64 = [Console]::In.ReadToEnd().Trim();          $bytes = [Convert]::FromBase64String($b64);          $prot = [Security.Cryptography.ProtectedData]::Protect($bytes, $null, 'CurrentUser');          [IO.File]::WriteAllText('{}', [Convert]::ToBase64String($prot))",
+        path.display()
+    );
+    let child = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else { return false };
+    if let Some(mut si) = child.stdin.take() {
+        // Base64 on stdin: the key never appears in argv.
+        let _ = si.write_all(b64_encode(key).as_bytes());
+    }
+    let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+    if ok {
+        restrict(&path);
+    }
+    ok
+}
+
+#[cfg(target_os = "windows")]
+fn keystore_load() -> Option<Vec<u8>> {
+    let path = dpapi_path();
+    if !path.exists() {
+        return None;
+    }
+    let script = format!(
+        "Add-Type -AssemblyName System.Security;          $b64 = [IO.File]::ReadAllText('{}').Trim();          $prot = [Convert]::FromBase64String($b64);          $bytes = [Security.Cryptography.ProtectedData]::Unprotect($prot, $null, 'CurrentUser');          [Console]::Out.Write([Convert]::ToBase64String($bytes))",
+        path.display()
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    b64_decode(String::from_utf8_lossy(&out.stdout).trim())
+}
+
+/// Minimal base64, so the key can cross a process boundary without a
+/// dependency and without touching a command line.
+#[cfg(target_os = "windows")]
+fn b64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+#[cfg(target_os = "windows")]
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => (c - b'A') as u32,
+            b'a'..=b'z' => (c - b'a') as u32 + 26,
+            b'0'..=b'9' => (c - b'0') as u32 + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    };
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::new();
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            return None;
+        }
+        let pad = chunk.iter().filter(|c| **c == b'=').count();
+        let mut n = 0u32;
+        for (i, c) in chunk.iter().enumerate() {
+            let v = if *c == b'=' { 0 } else { val(*c)? };
+            n |= v << (18 - 6 * i);
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(all(target_os = "windows", any()))]
@@ -572,5 +675,48 @@ mod secret_tests {
             "the secret was written in the clear"
         );
         forget_secret(&label);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod dpapi_tests {
+    use super::*;
+
+    /// Base64 must round-trip exactly, because it is how the key crosses the
+    /// process boundary into PowerShell and back.
+    #[test]
+    fn base64_round_trips() {
+        for case in [
+            vec![],
+            vec![0u8],
+            vec![0u8, 1],
+            vec![0u8, 1, 2],
+            vec![0xFFu8; 32],
+            (0u8..=255).collect::<Vec<u8>>(),
+        ] {
+            let encoded = b64_encode(&case);
+            let decoded = b64_decode(&encoded).expect("decodes");
+            assert_eq!(decoded, case, "round trip failed for {} bytes", case.len());
+        }
+    }
+
+    /// Deliberately NOT tested here: a live store-and-load round trip.
+    ///
+    /// The obvious test calls `keystore_store` with a known value and reads it
+    /// back. It passes, and it writes to the real keystore - replacing the
+    /// client key that every other test in this crate depends on. Tests running
+    /// beside it then fail, on Windows only, for reasons that have nothing to
+    /// do with what they assert. That is exactly what it did.
+    ///
+    /// The round trip is verified where it matters anyway: `master_key` reads
+    /// back what it stored on every start-up and falls through to the
+    /// restricted file if the value does not return identical. A test that
+    /// breaks its neighbours to prove something the product already checks is a
+    /// bad trade.
+    #[test]
+    fn the_store_path_is_derived_without_touching_it() {
+        let p = dpapi_path();
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("dpapi"));
+        assert!(p.parent().is_some(), "the secret must live under a directory");
     }
 }

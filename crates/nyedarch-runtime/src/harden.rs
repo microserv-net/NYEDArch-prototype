@@ -337,3 +337,67 @@ mod hooking_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod accumulator_use_tests {
+    /// The accumulator's value must be *used*.
+    ///
+    /// It was computed from six probes and then dropped - `let _diversified =
+    /// acc.finish();`. Anti-analysis that cannot change anything is the
+    /// security theatre the specification forbids (§75), and it is worse than
+    /// having none, because it reads as a defence.
+    ///
+    /// This asserts the value reaches something, and that what it reaches is
+    /// diversification rather than a gate: a discarding binding would fail the
+    /// first check, and `if diversified` deciding success would fail the second.
+    /// Comment lines are stripped before searching.
+    ///
+    /// The commentary above the fix quotes the old code as an explanation, so a
+    /// naive search matched the documentation and failed on correct code - the
+    /// same self-matching trap the capsule prompt tests hit.
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_tamper_accumulator_is_not_discarded() {
+        let src = code_only(include_str!("lib.rs"));
+        let dropped = format!("let _{} = acc.finish()", "diversified");
+        assert!(
+            !src.contains(&dropped),
+            "the accumulator is computed and thrown away"
+        );
+        assert!(
+            src.contains("let diversified = acc.finish();"),
+            "the accumulator's value must be bound and used"
+        );
+        assert!(
+            src.contains("decoy_rounds") && src.contains("read_order_flipped"),
+            "the value must reach the run's shape"
+        );
+    }
+
+    /// It must never gate authorization.
+    ///
+    /// Environment observations are not reproducible - a debugger on a support
+    /// call, a VM, a loaded machine - so anything derived from them would
+    /// eventually refuse an honest user. That is a worse failure than an
+    /// analyst having an easier afternoon.
+    #[test]
+    fn diversification_never_decides_the_outcome() {
+        let src = code_only(include_str!("lib.rs"));
+        for forbidden in [
+            "if diversified",
+            "diversified == ",
+            "diversified != ",
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "`{forbidden}` would make an unreproducible signal decide the run"
+            );
+        }
+    }
+}

@@ -54,6 +54,18 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
+    /// Verbose diagnostics, timestamped in IST (UTC+05:30).
+    ///
+    /// Reports what each step actually did: which provider answered a location
+    /// request and how accurate the fix was, how long Argon2id took, how many
+    /// bytes were sealed. Off by default, because a tool that narrates
+    /// everything trains people to stop reading it.
+    ///
+    /// Diagnostics confirm behaviour; they never reproduce secrets. Accuracy in
+    /// metres, never coordinates. Signal names, never raw identifiers.
+    #[arg(long, global = true)]
+    pub with_logs: bool,
+
     /// Print extra detail about this client's own work.
     ///
     /// Diagnostic only: it grants no authority, skips no check, and produces
@@ -112,6 +124,15 @@ authenticated: editing it, including its labels, invalidates it.")]
 The capsule authorizes itself. This client grants it nothing and never sees its
 passphrase.")]
     Run(RunArgs),
+
+    /// Write the self-seal digest into a compiled capsule.
+    ///
+    /// Run after `cargo build` and before delivery. A capsule without this
+    /// still runs; it simply cannot detect modification of its own image.
+    Selfseal {
+        /// The compiled capsule binary to seal in place.
+        binary: std::path::PathBuf,
+    },
 
     /// Measure this machine: fingerprinting, key derivation, compression.
     Bench,
@@ -279,6 +300,22 @@ mod tests {
     #[test]
     fn the_command_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// `--with-logs` is available on every subcommand, and off unless asked.
+    #[test]
+    fn verbose_logging_is_opt_in_and_global() {
+        let plain = Cli::try_parse_from(["nyedarch", "bench"]).expect("parses");
+        assert!(!plain.with_logs, "verbose output must be opt-in");
+
+        for args in [
+            vec!["nyedarch", "--with-logs", "bench"],
+            vec!["nyedarch", "seal", "i", "o", "p", "--with-logs"],
+            vec!["nyedarch", "machines", "list", "--with-logs"],
+        ] {
+            let cli = Cli::try_parse_from(&args).expect("parses");
+            assert!(cli.with_logs, "{args:?} should enable verbose logging");
+        }
     }
 
     #[test]

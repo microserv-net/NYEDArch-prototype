@@ -109,6 +109,60 @@ jobs:
           fi
           echo "no credentials in tracked files"
 
+  docs:
+    name: documentation consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Numbers in prose go stale the moment code changes, and this project has
+      # shipped several wrong ones - "12 executed attacks" when there were 13,
+      # "12 ADRs" when there were 13, and three different stale test counts. A
+      # claim nobody checks is a claim that drifts.
+      - name: Counts in the documentation must match the repository
+        shell: bash
+        run: |
+          set -e
+          fail=0
+
+          attacks=$(grep -c '#\[test\]' crates/nyedarch-package/tests/attack_lab.rs)
+          adrs=$(ls docs/decisions/*.md | wc -l | tr -d ' ')
+
+          for claimed in $(grep -rhoE '[0-9]+ executed attacks' docs README.md | grep -oE '^[0-9]+' | sort -u); do
+            if [ "$claimed" != "$attacks" ]; then
+              echo "::error::docs claim $claimed executed attacks; the register has $attacks"
+              fail=1
+            fi
+          done
+
+          for claimed in $(grep -rhoE '[0-9]+ architecture decision records' docs README.md | grep -oE '^[0-9]+' | sort -u); do
+            if [ "$claimed" != "$adrs" ]; then
+              echo "::error::docs claim $claimed decision records; there are $adrs"
+              fail=1
+            fi
+          done
+
+          # Every document referenced by another must exist somewhere under
+          # docs/. They are not all at the top level - the future-architecture
+          # set lives in docs/license-server/ - so this searches the tree rather
+          # than assuming a flat layout.
+          for ref in $(grep -rhoE '`[A-Za-z_]+\.md`' docs README.md | tr -d '`' | sort -u); do
+            if [ -z "$(find docs -name "$ref" -print -quit)" ] && [ ! -f "$ref" ]; then
+              echo "::error::a document references $ref, which does not exist"
+              fail=1
+            fi
+          done
+
+          # Security claims this project does not make.
+          if grep -rniE 'unbreakable|impossible to (reverse|bypass)|guarantees? (secure )?(erasure|deletion)' docs README.md \
+               | grep -viE 'not |never |cannot |no ' ; then
+            echo "::error::documentation makes a security claim the project does not stand behind"
+            fail=1
+          fi
+
+          [ "$fail" = "0" ] && echo "documentation counts and references are consistent"
+          exit $fail
+
   advisories:
     name: dependency advisories
     runs-on: ubuntu-latest

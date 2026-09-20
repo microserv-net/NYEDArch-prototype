@@ -1,0 +1,190 @@
+name: e2e
+
+# The end-to-end test the project was missing.
+#
+# Everything else verifies pieces: the crypto round-trips, the orchestrator
+# talks to a mock, the capsule authorizes. None of that catches a client that
+# dispatches a real build and then fails to hand the user a capsule - which is
+# exactly what happened, twice, for different reasons.
+#
+# This drives the shipped command-line client against real GitHub, with a real
+# token, and asserts a capsule file exists, runs, and produces the original
+# bytes back. If the delivery path breaks again, this goes red.
+on:
+  push:
+    branches: [main, master, "prototype-I", "prototype-*", "release/**"]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  # Remote builds cost minutes and push to a shared build repository; two at
+  # once would race over the same branch.
+  group: e2e
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  remote-delivery:
+    name: seal, build remotely, retrieve, run
+    runs-on: ubuntu-latest
+    # The whole point is the network round trip; if GitHub is slow the test
+    # should fail rather than hang a runner for an hour.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Is a build token available?
+        id: token
+        env:
+          NYEDARCH_BUILD_TOKEN: ${{ secrets.NYEDARCH_BUILD_TOKEN }}
+        run: |
+          if [ -z "$NYEDARCH_BUILD_TOKEN" ]; then
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::NYEDARCH_BUILD_TOKEN is not set; the end-to-end test cannot run."
+            echo "::warning::A fork will not have it. Set it on the repository to enable this job."
+          else
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the client
+        if: steps.token.outputs.have == 'true'
+        run: cargo build --release -p nyedarch-buildtool
+
+      - name: Seal a capsule
+        if: steps.token.outputs.have == 'true'
+        run: |
+          set -e
+          mkdir -p /tmp/e2e-src/nested
+          echo "end-to-end payload, top level" > /tmp/e2e-src/top.txt
+          echo "end-to-end payload, nested"    > /tmp/e2e-src/nested/deep.txt
+          # A file the extraction must reproduce byte for byte, including a
+          # directory, because a flat-file-only test would miss manifest bugs.
+          echo accept | ./target/release/nyedarch-buildtool seal \
+            /tmp/e2e-src /tmp/e2e-project "$E2E_PASSPHRASE"
+        env:
+          E2E_PASSPHRASE: e2e-passphrase-not-a-secret-2026
+
+      - name: Build remotely and retrieve the capsule
+        if: steps.token.outputs.have == 'true'
+        env:
+          NYEDARCH_GITHUB_TOKEN: ${{ secrets.NYEDARCH_BUILD_TOKEN }}
+          BUILD_OWNER: ${{ secrets.NYEDARCH_BUILD_OWNER || 'microserv-net' }}
+          BUILD_REPO: ${{ secrets.NYEDARCH_BUILD_REPO || 'nyedarch-builds' }}
+        run: |
+          set -e
+          ./target/release/nyedarch-buildtool build \
+            /tmp/e2e-project "$BUILD_OWNER" "$BUILD_REPO" public 2>&1 | tee /tmp/remote.log
+
+          # The client must have said where it put the capsule. A build that
+          # "succeeds" and delivers nothing is the failure this job exists for.
+          if ! grep -q "Capsule verified against the committed package and saved to" /tmp/remote.log; then
+            # Emitted as annotations, not just printed.
+            #
+            # Step output lives in the job log, which is only reachable through
+            # GitHub's storage host - blocked on some networks, including the
+            # one this is developed on. Annotations come back from the checks
+            # API, so the reason a build failed is readable everywhere.
+            echo "::error::the remote build did not deliver a capsule"
+            # Only the last few lines: GitHub caps how many annotations it
+            # keeps, and a wide tail meant the cap fell on the *earliest* of
+            # them - showing the middle of the run and hiding the ending, which
+            # is the part that says why it stopped.
+            tail -6 /tmp/remote.log | while IFS= read -r line; do
+              echo "::error::end: ${line}"
+            done
+            exit 1
+          fi
+
+      - name: The delivered capsule must run and reproduce the payload
+        if: steps.token.outputs.have == 'true'
+        env:
+          NYEDARCH_PASSPHRASE: e2e-passphrase-not-a-secret-2026
+        run: |
+          set -e
+          # The path is followed by a byte count in parentheses, so take the
+          # word after "saved to" and strip anything trailing.
+          CAP=$(grep -o "saved to [^ ]*" /tmp/remote.log | tail -1 | awk '{print $3}')
+          echo "capsule: [$CAP]"
+          if [ ! -f "$CAP" ]; then
+            echo "::error::no file at the reported path: $CAP"
+            grep -n "saved to" /tmp/remote.log | tail -3 | while IFS= read -r l; do
+              echo "::error::log: $l"
+            done
+            ls -la "$(dirname "$CAP")" || true
+            exit 1
+          fi
+          chmod +x "$CAP"
+
+          # It must be an executable for this platform, not another target's
+          # binary - selecting the wrong artifact is a bug this catches.
+          file "$CAP" | tee /tmp/file.txt
+          if ! grep -qi "ELF" /tmp/file.txt; then
+            echo "::error::the delivered capsule is not a binary for this platform"
+            echo "::error::file says: $(cat /tmp/file.txt)"
+            grep -o "saved to .*" /tmp/remote.log | tail -1 | while IFS= read -r l; do
+              echo "::error::log: $l"
+            done
+            exit 1
+          fi
+
+          if ! "$CAP" /tmp/e2e-out; then
+            echo "::error::the capsule refused to open with the correct passphrase"
+            exit 1
+          fi
+          if ! diff -r /tmp/e2e-src /tmp/e2e-out/e2e-src; then
+            echo "::error::the extracted tree does not match the original"
+            find /tmp/e2e-out -maxdepth 3 | head -20 | while IFS= read -r l; do
+              echo "::error::out: $l"
+            done
+            exit 1
+          fi
+
+          # And a wrong passphrase must be refused, leaving nothing behind.
+          if NYEDARCH_PASSPHRASE=wrong "$CAP" /tmp/e2e-bad; then
+            echo "::error::a wrong passphrase was accepted"
+            exit 1
+          fi
+          if [ -d /tmp/e2e-bad ] && [ -n "$(ls -A /tmp/e2e-bad 2>/dev/null)" ]; then
+            echo "::error::a denied run wrote output"
+            exit 1
+          fi
+          echo "end to end: delivered, ran, extraction identical, denial clean"
+
+      - name: No source may be left where the capsule was delivered
+        if: steps.token.outputs.have == 'true'
+        run: |
+          set -e
+          CAP=$(grep -o "saved to [^ ]*" /tmp/remote.log | tail -1 | cut -d' ' -f3)
+          DIR=$(dirname "$CAP")
+          # The user receives a capsule, not a Rust project (spec §22). The
+          # capsule is delivered *beside* the working project, so its own
+          # directory must contain no trace of one.
+          for forbidden in Cargo.toml src vendor unlock stage-capsule.sh; do
+            if [ -e "$DIR/$forbidden" ]; then
+              echo "::error::runtime source was delivered alongside the capsule: $forbidden"
+              ls -la "$DIR"
+              exit 1
+            fi
+          done
+          echo "only the capsule was delivered"
+
+      - name: Publish the log for inspection
+        if: always() && steps.token.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-remote-log
+          path: /tmp/remote.log
+          if-no-files-found: warn
+          retention-days: 3
+
+      # No commit-comment fallback.
+      #
+      # It failed with 403 on every run: the workflow GITHUB_TOKEN is
+      # "Contents: read", so it cannot comment. A step that can never succeed is
+      # worse than no step - it looks like a safety net and is not one.
+      # Annotations are the channel that works here.

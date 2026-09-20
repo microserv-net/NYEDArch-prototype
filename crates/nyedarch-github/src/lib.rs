@@ -49,7 +49,7 @@ mod tests {
             } else if req.url.contains("/actions/runs/") && !req.url.contains("/artifacts") {
                 // A completed, successful run so the wait loop exits at once.
                 br#"{"id":42,"status":"completed","conclusion":"success"}"#.to_vec()
-            } else if req.url.ends_with("/actions/runs?per_page=5") {
+            } else if req.url.ends_with("/actions/runs?per_page=30") {
                 // Before dispatch the newest run is 41; afterwards it is 42, so
                 // the client can tell a genuinely new run from a stale one.
                 let dispatched = self
@@ -58,9 +58,9 @@ mod tests {
                     .iter()
                     .any(|c| c.contains("/dispatches"));
                 if dispatched {
-                    br#"{"total_count":2,"workflow_runs":[{"id":42,"status":"queued"}]}"#.to_vec()
+                    br#"{"total_count":2,"workflow_runs":[{"id":42,"status":"queued","run_number":2,"workflow_id":7}]}"#.to_vec()
                 } else {
-                    br#"{"total_count":1,"workflow_runs":[{"id":41,"status":"completed"}]}"#.to_vec()
+                    br#"{"total_count":1,"workflow_runs":[{"id":41,"status":"completed","run_number":1,"workflow_id":7}]}"#.to_vec()
                 }
             } else if false {
                 br#"{"total_count":1,"workflow_runs":[{"id":42,"status":"queued"}]}"#.to_vec()
@@ -72,7 +72,7 @@ mod tests {
                 art.extend_from_slice(b"-TRAILER");
                 art
             } else if req.url.contains("/artifacts") {
-                br#"{"total_count":1,"artifacts":[{"id":7,"name":"nyedarch-capsule"}]}"#.to_vec()
+                br#"{"total_count":1,"artifacts":[{"id":7,"name":"nyedarch-capsule-x86_64-unknown-linux-gnu"}]}"#.to_vec()
             } else {
                 b"{}".to_vec()
             };

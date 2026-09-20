@@ -154,6 +154,89 @@ regions of its own; and this is a Linux-specific view — the other platforms fa
 back to the environment-marker probe. It contributes observations, never a
 verdict.
 
+### 5b. The tamper accumulator was being discarded — FIXED
+
+Found by audit, and worth recording plainly because it is the failure this
+document is most at risk of: the accumulator was computed from six probes and
+then thrown away (`let _diversified = acc.finish();`).
+
+Every anti-analysis probe fed a number that went straight in the bin. That is
+security theatre (§75), and **worse than having none**: in a review it reads as
+a defence, so nobody looks again.
+
+**What it does now.** It changes the *shape* of a run: how many decoy rounds the
+authorization path performs, and the order of two independent integrity reads.
+An analyst single-stepping an instrumented run sees a different trace from an
+uninstrumented one, and traces differ between machines, so notes taken on one do
+not transfer cleanly to another.
+
+**What it must never do.** Gate anything, or become key material. Environment
+observations are not reproducible — a debugger attached during a support call, a
+virtual machine, a loaded host — so anything derived from them would eventually
+refuse an honest user. That is a far worse failure than an analyst having an
+easier afternoon. Two tests enforce this: one asserts the value is bound and
+reaches the run's shape, the other that `if diversified` and equality
+comparisons against it never appear.
+
+**Honest scope.** This raises the cost of analysis. It stops nobody. The
+confidentiality boundary is the composed key, as everywhere else in this
+document.
+
+### 5c. Self-image integrity — IMPLEMENTED AND TESTED
+
+Found by attacking a delivered capsule rather than by review.
+
+Flipping a byte in the **sealed package** region is refused every time: that
+region is authenticated, and the suite proves it at three offsets. Flipping a
+byte elsewhere in the binary — in code or padding the run does not depend on —
+goes **unnoticed**, and the capsule opens normally for its legitimate owner.
+
+Two things are true here and neither should be overstated.
+
+**The confidentiality boundary is intact.** An inert edit does not yield
+plaintext, and a meaningful one cannot either: the payload key is composed from
+the authorization factors, so patching a branch changes control flow without
+producing key material. The capsule in that test opened because the correct
+passphrase was supplied on the correct machine — it was not a bypass.
+
+**The anti-tamper layer is weaker than §30 asks for.** The specification wants a
+generated executable that detects modification of itself, as defence in depth.
+Today it verifies the package it carries, not the image it runs as. An attacker
+who patches the binary gains nothing cryptographically, but they also are not
+detected doing it, and they can iterate without consuming the specimen.
+
+**Now closed.** The capsule reserves a 48-byte field: a magic prefix and a
+32-byte digest. After compilation `nyedarch-buildtool selfseal` zeroes the
+digest field, hashes the image, and writes the result back. At start-up the
+runtime does the same in reverse and compares. Verified against a real capsule:
+a byte flipped anywhere in the image is now refused.
+
+Three things were worth getting right:
+
+**A binary cannot hash itself.** Zeroing the field before hashing, on both
+sides, is what makes the two agree.
+
+**The field is found by scanning, not by a recorded offset.** The linker decides
+where static data lands; an offset computed at build time is a promise about
+layout nobody made.
+
+**An unsealed capsule still runs.** If the post-build step did not run, the
+digest is zero and the check reports "not sealed". Refusing there would turn a
+skipped build step into total loss of access — a missing defence-in-depth layer
+is a weaker capsule, a false positive is a destroyed one.
+
+That last point was not theoretical. The first implementation stored the magic
+as a literal, which put a *second* copy in the image — the library's own
+constant — and the scanner found that one, read the unrelated bytes after it as
+a digest, and refused every unsealed capsule. The magic is now rebuilt at run
+time from masked bytes, and every candidate field is considered rather than the
+first: intact if any verifies, unsealed if any is still zeroed, modified only
+when neither holds.
+
+**It is still not the confidentiality boundary.** A patched branch yields no key
+material either way. What this adds is detection: an attacker who edits the
+image fails closed and spends a specimen instead of getting a free iteration.
+
 ## 6. Memory hygiene limits
 
 `Zeroizing` clears buffers on drop and minimises secret lifetime. It does **not**
@@ -205,13 +288,23 @@ one authenticating the EULA acceptance record - are derived from a random
 32-byte master key held in the platform keystore: Keychain on macOS, Secret
 Service on Linux.
 
-**Windows uses the restricted file, not DPAPI (OPEN).** The PowerShell DPAPI
-round trip did not reproduce reliably on a real Windows runner - a store would
-report success and a later load return nothing, so every run minted a fresh key
-and every record signed previously became unverifiable. An unreliable keystore
-is worse than an honest file: the file is stable and the degradation is reported
-at startup. DPAPI is disabled there until it can be made deterministic and
-verified on real hardware. Each secret is domain-separated, so
+**Windows uses DPAPI again.** The first attempt went through PowerShell's
+`ConvertTo-SecureString` / `ConvertFrom-SecureString`, which did not round-trip
+on a real runner: a store reported success and a later load returned nothing, so
+every run minted a fresh key and every previously signed record became
+unverifiable.
+
+It now calls .NET `ProtectedData` directly - the primitive underneath those
+cmdlets, which takes and returns plain bytes rather than carrying SecureString
+and console-encoding behaviour. The secret crosses on **stdin** in both
+directions, never in a command line where another user could read it from the
+process list.
+
+The safety net matters more than the mechanism: `master_key` reads back what it
+stored and falls through to the restricted file if the value does not return
+identical. A keystore that cannot return what it was given is not trusted,
+whatever its documentation says - which is why the original failure cost nothing
+this time. Each secret is domain-separated, so
 recovering one reveals nothing about another.
 
 This replaced a constant compiled into the binary. Under the old scheme anyone

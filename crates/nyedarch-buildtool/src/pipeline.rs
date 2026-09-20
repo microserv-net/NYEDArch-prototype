@@ -179,7 +179,18 @@ pub fn nyfp_key() -> [u8; 32] {
             // user cannot act on, so this degrades to a per-machine value.
             // `keystore::current_source()` reports the degradation; it is never
             // silent, and it is still not a constant compiled into the binary.
-            let fp = nyedarch_fingerprint::capture();
+            let t_fp = std::time::Instant::now();
+    let fp = nyedarch_fingerprint::capture();
+    crate::logging::log("fingerprint", format!(
+        "captured {} in {:?} from {} signal(s), best strength {:?}",
+        &fp.id_hex()[..16],
+        t_fp.elapsed(),
+        fp.signals.len(),
+        fp.best_strength
+    ));
+    for sig in &fp.signals {
+        crate::logging::log("fingerprint", format!("  signal {} ({:?})", sig.name, sig.strength));
+    }
             *nyedarch_crypto::kdf::hkdf_key(
                 b"nyedarch:v1:nyfp:degraded",
                 &fp.id,
@@ -234,7 +245,18 @@ pub fn seal_and_generate(
     if is_cancelled() {
         return Err(SealError::Cancelled);
     }
+    let t_fp = std::time::Instant::now();
     let fp = nyedarch_fingerprint::capture();
+    crate::logging::log("fingerprint", format!(
+        "captured {} in {:?} from {} signal(s), best strength {:?}",
+        &fp.id_hex()[..16],
+        t_fp.elapsed(),
+        fp.signals.len(),
+        fp.best_strength
+    ));
+    for sig in &fp.signals {
+        crate::logging::log("fingerprint", format!("  signal {} ({:?})", sig.name, sig.strength));
+    }
     if req.creator_mode {
         diagnostics.push(format!(
             "fingerprint {} from {} signal(s), best strength {:?}",
@@ -313,23 +335,44 @@ pub fn seal_and_generate(
             // Native provider first; the browser consent flow is the fallback,
             // because most desktops have no usable native provider. Never typed
             // in, and never an IP lookup.
+            crate::logging::log("location", format!(
+                "asking for a fix accurate to {tol_m} m or better"
+            ));
+            let t0 = std::time::Instant::now();
             let (reading, source) =
                 nyedarch_platform::acquire_location_with_fallback(Some(tol_m))
                     .map_err(|e| SealError::LocationFailed(e))?;
-            let _ = source;
+
+            // Which provider answered, and how good the fix was.
+            //
+            // This was `let _ = source;` - the client knew whether the operating
+            // system or the browser had answered and threw it away, so nobody
+            // could tell whether a location had really been captured or where
+            // it came from. Accuracy and provider are reported; coordinates
+            // never are.
+            crate::logging::log("location", format!(
+                "fix from {source:?} in {:?}, accuracy {:.1} m (tolerance {tol_m} m)",
+                t0.elapsed(),
+                reading.accuracy_m
+            ));
             if reading.accuracy_m > tol_m as f64 {
                 return Err(SealError::LocationTooCoarse {
                     reported_m: reading.accuracy_m,
                     required_m: tol_m,
                 });
             }
-            Some(
-                nyedarch_crypto::geo::quantize(
-                    &reading,
-                    nyedarch_crypto::geo::ToleranceMeters(tol_m),
-                )
-                .map_err(|_| SealError::Crypto("quantize location"))?,
+            let cell = nyedarch_crypto::geo::quantize(
+                &reading,
+                nyedarch_crypto::geo::ToleranceMeters(tol_m),
             )
+            .map_err(|_| SealError::Crypto("quantize location"))?;
+            // The region identifier, abbreviated. Enough to confirm two builds
+            // resolved to the same place; not enough to locate anyone.
+            crate::logging::log("location", format!(
+                "region identifier {}… derived and bound into the payload key",
+                cell.iter().take(4).map(|b| format!("{b:02x}")).collect::<String>()
+            ));
+            Some(cell)
         }
         None => None,
     };
@@ -363,6 +406,13 @@ pub fn seal_and_generate(
     if req.creator_mode {
         diagnostics.push(format!("argon2id took {:?}", t_argon.elapsed()));
     }
+    crate::logging::log("keys", format!(
+        "argon2id completed in {:?} (m={} KiB, t={}, p={})",
+        t_argon.elapsed(),
+        req.argon.m_cost,
+        req.argon.t_cost,
+        req.argon.p_cost
+    ));
 
     // --- package -----------------------------------------------------------
     on_stage(Stage::CollectingFiles);
@@ -384,6 +434,11 @@ pub fn seal_and_generate(
         chunk_size: 256 * 1024,
     };
     let payload_bytes: u64 = files.iter().map(|f| f.size).sum();
+    crate::logging::log("payload", format!(
+        "{} file(s), {} byte(s) to protect",
+        files.len(),
+        payload_bytes
+    ));
     let level = req.compression.level(payload_bytes);
     if req.creator_mode {
         diagnostics.push(format!(
@@ -411,6 +466,12 @@ pub fn seal_and_generate(
     if req.creator_mode {
         diagnostics.push(format!("sealed {} byte(s) in {:?}", pkg.len(), t_seal.elapsed()));
     }
+    crate::logging::log("payload", format!(
+        "sealed to {} byte(s) in {:?} using {} (level {level})",
+        pkg.len(),
+        t_seal.elapsed(),
+        req.compression.label()
+    ));
 
     // --- generate the capsule project --------------------------------------
     on_stage(Stage::GeneratingProject);
@@ -501,47 +562,4 @@ pub fn runtime_source_root() -> PathBuf {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("crates"))
-}
-
-/// Compile a generated capsule project on this machine.
-///
-/// The remote build is how a capsule is produced for *other* platforms, and it
-/// stays the default. But when it cannot deliver - no network, a failed run, a
-/// timeout - the client used to hand the user a directory and tell them to run
-/// `stage-capsule.sh` themselves. That is the client's job: it has the project,
-/// it knows where the capsule goes, and asking someone to run a shell script to
-/// finish a build they already started is not a product.
-///
-/// Returns the path of the compiled capsule inside the project.
-pub fn build_locally(
-    project_dir: &std::path::Path,
-    mut on_line: impl FnMut(String),
-) -> Result<std::path::PathBuf, String> {
-    on_line("Building the capsule on this machine.".to_string());
-    on_line("This compiles the capsule's own source, so it takes a minute.".to_string());
-
-    let out = std::process::Command::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(project_dir)
-        .env("CARGO_INCREMENTAL", "0")
-        .output()
-        .map_err(|e| format!("could not run cargo: {e}. Is the Rust toolchain installed?"))?;
-
-    if !out.status.success() {
-        // The compiler's own words are far more useful than "build failed".
-        let err = String::from_utf8_lossy(&out.stderr);
-        for line in err.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
-            on_line(line.to_string());
-        }
-        return Err("the capsule did not compile on this machine".to_string());
-    }
-
-    let mut candidate = project_dir.join("target/release/nyedarch-capsule");
-    if !candidate.exists() {
-        candidate = project_dir.join("target/release/nyedarch-capsule.exe");
-    }
-    if !candidate.exists() {
-        return Err("the build reported success but produced no capsule".to_string());
-    }
-    Ok(candidate)
 }

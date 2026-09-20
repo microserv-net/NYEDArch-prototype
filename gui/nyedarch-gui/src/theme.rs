@@ -128,7 +128,7 @@ pub fn card_rounding() -> Rounding {
 }
 
 pub fn hairline() -> Stroke {
-    Stroke::new(1.0, LINE)
+    Stroke::new(1.0_f32, LINE)
 }
 
 /// The card shadow. Wide, soft and very light — the difference between an
@@ -169,7 +169,7 @@ pub fn apply(ctx: &egui::Context) {
     v.popup_shadow = card_shadow(0.5);
     v.menu_rounding = Rounding::same(R_CONTROL);
     v.selection.bg_fill = alpha(SKY, 0.22);
-    v.selection.stroke = Stroke::new(1.0, SKY_DEEP);
+    v.selection.stroke = Stroke::new(1.0_f32, SKY_DEEP);
     v.hyperlink_color = SKY_DEEP;
 
     // Controls are flat until touched.
@@ -184,14 +184,14 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.noninteractive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.noninteractive.bg_fill = SURFACE;
     v.widgets.noninteractive.bg_stroke = hairline();
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, INK_SOFT);
+    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, INK_SOFT);
     v.widgets.noninteractive.rounding = ctrl;
 
     // No fill and no outline at rest: a toolbar of outlined boxes is noise.
     v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     v.widgets.inactive.bg_fill = SUNKEN;
     v.widgets.inactive.bg_stroke = Stroke::NONE;
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, INK_SOFT);
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, INK_SOFT);
     v.widgets.inactive.rounding = ctrl;
 
     // Hover is a soft tint only. No border, so nothing appears to "snap" into
@@ -199,7 +199,7 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.hovered.weak_bg_fill = SKY_WASH;
     v.widgets.hovered.bg_fill = SKY_WASH;
     v.widgets.hovered.bg_stroke = Stroke::NONE;
-    v.widgets.hovered.fg_stroke = Stroke::new(1.0, SKY_DEEP);
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, SKY_DEEP);
     v.widgets.hovered.rounding = ctrl;
     v.widgets.hovered.expansion = 0.0;
 
@@ -207,7 +207,7 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.active.weak_bg_fill = alpha(SKY, 0.18);
     v.widgets.active.bg_fill = alpha(SKY, 0.18);
     v.widgets.active.bg_stroke = Stroke::NONE;
-    v.widgets.active.fg_stroke = Stroke::new(1.0, SKY_DEEP);
+    v.widgets.active.fg_stroke = Stroke::new(1.0_f32, SKY_DEEP);
     v.widgets.active.rounding = ctrl;
     v.widgets.active.expansion = 0.0;
 

@@ -114,3 +114,78 @@ transferred to the replacement licence.
 
 Transfer decisions are recorded with the reason, so that "who decided this and
 why" is answerable months later.
+
+
+---
+
+## One licence key per user
+
+> **Prototype-II — yet to be developed.**
+
+**A user is ever issued one licence key.** Renewal extends continued use under
+that user's existing licence relationship; it does not mint a second key and
+does not create a new identity.
+
+This is a deliberate constraint, and the reason is capsule binding rather than
+billing convenience. A capsule is created under a licence identity and stays
+bound to it. If renewal produced a fresh key, every capsule sealed under the
+previous one would need re-binding or a compatibility path — and a compatibility
+path that accepts "some earlier key of the same user" is indistinguishable, from
+the capsule's point of view, from accepting an unrelated key.
+
+**An unrelated user's valid licence must never authorize another user's
+capsule.** Holding a valid licence proves you may use the product; it does not
+prove you may open this artifact.
+
+| Event | Effect on the key | Effect on existing capsules |
+|---|---|---|
+| Renewal | Same key, extended term | Continue to authorize |
+| Lapse, then renewal | Same key, term resumes | Continue to authorize |
+| Permanent revocation | Key is dead, permanently | Refused — see recovery below |
+| New purchase after revocation | A new identity | Do **not** authorize the old capsules |
+
+That last row is the sharp edge, and it is why the recovery workflow below
+exists. A user who is revoked and buys again is, to the system, a different
+licence identity — their old capsules do not come back automatically, and they
+must not.
+
+### What the key is, and is not
+
+The key is a bootstrap and activation credential. It is **not** the complete
+authorization mechanism: the system must remain secure when the key is known but
+account authentication and the other required factors are absent. A design in
+which possession of the key alone opens anything has moved the whole security
+model onto a string the user pasted into a chat window once.
+
+---
+
+## Verified capsule recovery after permanent revocation
+
+> **Prototype-II — yet to be developed.**
+
+A legitimate user whose licence has been permanently revoked may still hold
+capsules containing data they legitimately need. Revocation is meant to stop
+misuse, not to destroy someone's records.
+
+The workflow is deliberately narrow:
+
+1. The user submits a support request naming **the specific capsules** they need.
+2. Identity and legitimacy of the request are verified.
+3. Ownership or association of those capsules is verified.
+4. Exactly the verified capsules are authorized — nothing else.
+5. Each approved capsule may be unlocked **once**.
+6. The entire recovery event is recorded in the audit trail.
+
+**This must never become a master unlock.** Every property above exists to stop
+that: naming specific capsules stops a blanket grant, one unlock per capsule
+stops a standing capability, and the audit record stops it happening quietly.
+
+It is intentionally inconvenient compared with normal operation. That is the
+point — the cost is what keeps it from being used as a routine bypass, and the
+inconvenience falls on the rare legitimate case rather than on everyone.
+
+This is one instance of the governing principle:
+
+> **Hostile by default toward suspicious activity; carefully recoverable for
+> verified legitimate users.** Extreme restriction for the former, extreme
+> specificity for the latter.

@@ -180,6 +180,8 @@ struct App {
     /// Compression effort (spec §16) and creator mode (spec §50).
     compression: nyedarch_package::pipeline::CompressionMode,
     creator_mode: bool,
+    /// Verbose, timestamped diagnostics in the activity log.
+    with_logs: bool,
     /// Set to cancel an in-flight build (spec §61).
     cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Creator-mode diagnostics from the last build.
@@ -257,6 +259,7 @@ impl Default for App {
             run_ok: false,
             compression: nyedarch_package::pipeline::CompressionMode::Automatic,
             creator_mode: false,
+            with_logs: false,
             cancel_flag: None,
             pending_diagnostics: Vec::new(),
             pulse_phase: 0.0,
@@ -349,8 +352,20 @@ impl App {
         }
     }
 
+    /// Append an activity line.
+    ///
+    /// Timestamped in IST when verbose logging is on, so a line here lines up
+    /// with the same run's command-line output. Without it the two logs
+    /// describe one build in two vocabularies and neither can be checked
+    /// against the other.
     fn say(&mut self, now: f64, msg: impl Into<String>) {
-        self.log.push((now, msg.into()));
+        let text = msg.into();
+        let text = if self.with_logs {
+            format!("{}  {text}", nyedarch_buildtool::logging::timestamp())
+        } else {
+            text
+        };
+        self.log.push((now, text));
         if self.log.len() > 200 {
             self.log.remove(0);
         }
@@ -522,7 +537,41 @@ impl App {
     /// Nothing here is simulated: this is the same `seal_and_generate` the
     /// command-line client runs, and the progress bar advances only when the
     /// pipeline reports a stage.
+    /// Begin a build, refusing anything the pipeline would refuse.
+    ///
+    /// The enabled state of a button is not a guard. Until now it was the only
+    /// one: `ready_to_build` decided whether the control could be pressed, and
+    /// this function trusted that it had been. Two callers already exist, the
+    /// spine lets someone reach the Build stage from anywhere, and a third
+    /// caller added later would inherit no check at all.
+    ///
+    /// So the conditions are enforced where the work starts, not where it is
+    /// offered. This is the same reasoning the capsule follows: a branch that
+    /// merely hides an action is not what makes the action impossible.
     fn start_build(&mut self, now: f64) {
+        if self.building {
+            return;
+        }
+        if self.source_path.trim().is_empty() {
+            self.say(now, "Nothing selected to protect.");
+            self.toast(now, "Choose a source first", t::ROSE);
+            self.goto(Step::Source, now);
+            return;
+        }
+        if !self.passphrase_acceptable() {
+            let (_, why, _) = w::passphrase_strength(&self.passphrase);
+            self.say(now, format!("Passphrase refused: {why}"));
+            self.toast(now, "Passphrase too weak", t::ROSE);
+            self.goto(Step::Protections, now);
+            return;
+        }
+        if !(self.target_windows || self.target_macos || self.target_linux) {
+            self.say(now, "No build target selected.");
+            self.toast(now, "Choose a platform", t::ROSE);
+            self.goto(Step::Targets, now);
+            return;
+        }
+
         if self.building {
             return;
         }
@@ -717,50 +766,29 @@ impl App {
                         )));
                         let _ = tx.send(BuildMsg::Note("Working files removed.".to_string()));
                     } else {
-                        // The remote build did not deliver. Finish the job here
-                        // rather than handing over a directory and instructions.
+                        // No local fallback.
+                        //
+                        // Capsules are built remotely, and that is a security
+                        // property rather than a convenience: the build
+                        // environment is fixed, the artifact is checked against
+                        // a commitment made beforehand, and the toolchain is
+                        // not whatever happens to be on this machine. Quietly
+                        // compiling here when the remote build failed would
+                        // produce a capsule none of that applied to.
                         let _ = tx.send(BuildMsg::Note(
-                            "The remote build did not return a capsule.".to_string(),
+                            "No capsule was produced: the remote build did not return one."
+                                .to_string(),
                         ));
-                        let tx4 = tx.clone();
-                        match nyedarch_buildtool::pipeline::build_locally(&o.project_dir, move |l| {
-                            let _ = tx4.send(BuildMsg::Note(l));
-                        }) {
-                            Ok(built) => match std::fs::copy(&built, &deliver_check) {
-                                Ok(_) => {
-                                    #[cfg(unix)]
-                                    {
-                                        use std::os::unix::fs::PermissionsExt;
-                                        let _ = std::fs::set_permissions(
-                                            &deliver_check,
-                                            std::fs::Permissions::from_mode(0o755),
-                                        );
-                                    }
-                                    let _ = std::fs::remove_dir_all(&o.project_dir);
-                                    let _ = tx.send(BuildMsg::Note(format!(
-                                        "Capsule built here and saved to {}",
-                                        deliver_check.display()
-                                    )));
-                                    let _ = tx.send(BuildMsg::Note(
-                                        "Built for this platform only. Use the remote build for others."
-                                            .to_string(),
-                                    ));
-                                    let _ = tx.send(BuildMsg::Note("Working files removed.".into()));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(BuildMsg::Note(format!(
-                                        "The capsule was built but could not be saved: {e}"
-                                    )));
-                                }
-                            },
-                            Err(e) => {
-                                let _ = tx.send(BuildMsg::Note(format!("Local build failed: {e}")));
-                                let _ = tx.send(BuildMsg::Note(format!(
-                                    "The working files have been kept at {}",
-                                    o.project_dir.display()
-                                )));
-                            }
-                        }
+                        let _ = tx.send(BuildMsg::Note(
+                            "Nothing has been built locally - capsules are always built remotely."
+                                .to_string(),
+                        ));
+                        let _ = tx.send(BuildMsg::Note(
+                            "Check the workflow run on GitHub, then build again.".to_string(),
+                        ));
+                        // Working files are still removed: they are the runtime
+                        // source, and they are not a deliverable.
+                        let _ = std::fs::remove_dir_all(&o.project_dir);
                     }
                     let _ = tx.send(BuildMsg::Done {
                         project: o.project_dir,
@@ -998,87 +1026,64 @@ impl App {
 // ------------------------------------------------------------------- rail ---
 
 impl App {
+    /// Header and stage spine.
+    ///
+    /// This replaced a 236 px sidebar of numbered steps. A vertical list of
+    /// stages is what every settings window looks like, and it spent a fifth of
+    /// the screen telling you where you were instead of showing you anything.
+    ///
+    /// The spine runs across the top, the capsule sits beneath it as a standing
+    /// object, and the full width is left for the work. The light along the
+    /// spine travels in the same direction as the perimeter pulse, so the window
+    /// has one direction of travel rather than two competing ones.
     fn rail(&mut self, ctx: &egui::Context, now: f64) {
-        egui::SidePanel::left("rail")
-            .exact_width(236.0)
-            .resizable(false)
-            .frame(egui::Frame::none().fill(t::RAIL).inner_margin(egui::Margin {
-                left: 12.0,
-                right: 12.0,
-                top: 16.0,
-                bottom: 12.0,
-            }))
+        egui::TopBottomPanel::top("spine")
+            .exact_height(132.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(t::RAIL)
+                    .inner_margin(egui::Margin::symmetric(22.0, 12.0)),
+            )
             .show(ctx, |ui| {
-                // Wordmark with the aperture.
-                let (logo_rect, _) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 56.0), Sense::hover());
-                let open = self.active_protections() as f32 / 4.0;
-                w::aperture(ui.painter(),
-                    pos2(logo_rect.left() + 23.0, logo_rect.center().y),
-                    44.0,
-                    now,
-                    1.0 - open * 0.8,
-                    self.building,
-                );
-                ui.painter().text(
-                    pos2(logo_rect.left() + 52.0, logo_rect.center().y - 9.0),
-                    Align2::LEFT_CENTER,
-                    "NYEDArch",
-                    t::font(19.0),
-                    t::INK,
-                );
-                ui.painter().text(
-                    pos2(logo_rect.left() + 52.0, logo_rect.center().y + 10.0),
-                    Align2::LEFT_CENTER,
-                    "Not Your Everyday Archive",
-                    t::font(t::MICRO),
-                    t::INK_MUTED,
-                );
+                ui.horizontal(|ui| {
+                    let open = self.active_protections() as f32 / 4.0;
+                    let (mark, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+                    w::aperture(
+                        ui.painter(),
+                        mark.center(),
+                        44.0,
+                        now,
+                        1.0 - open * 0.8,
+                        self.building,
+                    );
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.add_space(2.0);
+                        ui.label(egui::RichText::new("NYEDArch").size(19.0).color(t::INK));
+                        ui.label(
+                            egui::RichText::new("Not Your Everyday Archive")
+                                .size(t::MICRO)
+                                .color(t::INK_MUTED),
+                        );
+                    });
+                });
 
-                ui.add_space(12.0);
-                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
-                ui.painter().rect_filled(r, Rounding::ZERO, t::LINE);
-                ui.add_space(10.0);
+                ui.add_space(4.0);
 
-                // Sliding active indicator, painted before the items.
-                let first_y = ui.cursor().top();
-                let item_h = 50.0 + ui.spacing().item_spacing.y;
-                let target_y = first_y + self.step.index() as f32 * item_h;
-                let y = ui
-                    .ctx()
-                    .animate_value_with_time(egui::Id::new("rail_ind"), target_y, 0.22);
-                let ind = Rect::from_min_size(pos2(ui.min_rect().left() - 8.0, y + 9.0), vec2(3.0, 32.0));
-                ui.painter().rect_filled(ind, Rounding::same(2.0), t::SKY);
-                w::glow(ui.painter(), ind.center(), 20.0, t::SKY, 0.4);
-
-                let mut clicked = None;
-                for (i, s) in Step::ALL.iter().enumerate() {
-                    let done = self.step_done(*s) && *s != self.step;
-                    if w::nav_item(ui, i, s.label(), s.hint(), *s == self.step, done).clicked() {
-                        clicked = Some(*s);
+                let labels: Vec<(&str, &str)> =
+                    Step::ALL.iter().map(|s| (s.label(), s.hint())).collect();
+                let done: Vec<bool> = Step::ALL
+                    .iter()
+                    .map(|s| self.step_done(*s) && *s != self.step)
+                    .collect();
+                if let Some(i) = w::spine(ui, &labels, self.step.index(), &done, now) {
+                    if let Some(s) = Step::ALL.get(i) {
+                        self.goto(*s, now);
                     }
                 }
-                if let Some(s) = clicked {
-                    self.goto(s, now);
-                }
-
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new("protections engaged")
-                            .size(t::MICRO)
-                            .color(t::INK_MUTED),
-                    );
-                    ui.add_space(2.0);
-                    w::posture_ring(ui, 104.0, self.active_protections(), 4, now);
-                });
             });
     }
-}
 
-// ------------------------------------------------------------------ views ---
-
-impl App {
     fn view_source(&mut self, ui: &mut egui::Ui, now: f64) {
         w::section_title(
             ui,
@@ -1350,7 +1355,7 @@ impl App {
                             rect,
                             Rounding::same(rect.height() / 2.0),
                             t::alpha(colour, if on { 0.20 } else { 0.08 }),
-                            Stroke::new(1.0, t::alpha(colour, if on { 0.8 } else { 0.35 })),
+                            Stroke::new(1.0_f32, t::alpha(colour, if on { 0.8 } else { 0.35 })),
                         );
                         ui.painter().galley(rect.min + vec2(10.0, 5.0), galley, colour);
                         if resp.clicked() {
@@ -1788,6 +1793,35 @@ impl App {
             });
         });
         self.creator_mode = creator;
+
+        ui.add_space(6.0);
+        let mut logs = self.with_logs;
+        ui.horizontal(|ui| {
+            w::switch(ui, "sw_logs", &mut logs, false);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(egui::RichText::new("Verbose logs").size(t::SMALL).color(t::INK));
+                ui.label(
+                    egui::RichText::new(
+                        "Timestamped diagnostics in IST: which provider answered a location \
+                         request and how accurate it was, how long key derivation took, how much \
+                         was sealed.",
+                    )
+                    .size(t::MICRO)
+                    .color(t::INK_MUTED),
+                );
+            });
+        });
+        if logs != self.with_logs {
+            self.with_logs = logs;
+            // The pipeline reads this flag on the worker thread, so it has to be
+            // set globally rather than passed down.
+            nyedarch_buildtool::logging::set_verbose(logs);
+            // Buffer rather than write to stderr: from an application bundle,
+            // stderr goes nowhere the user will look.
+            nyedarch_buildtool::logging::set_capture(logs);
+            self.say(now, if logs { "Verbose logging on." } else { "Verbose logging off." });
+        }
         if !self.ready_to_build() {
             ui.add_space(6.0);
             let missing = if !self.step_done(Step::Source) {
@@ -1857,7 +1891,8 @@ impl App {
         w::section_title(
             ui,
             "Run a capsule",
-            "Drop a .nyarch capsule anywhere on this window, or open one from the Capsule menu.",
+            "Drop a capsule anywhere on this window to open it, or drop a folder to protect it instead. \
+             You can also open one from the Capsule menu.",
         );
 
         let name = self
@@ -1959,7 +1994,7 @@ impl App {
                 ui.set_max_width(660.0);
                 egui::Frame::none()
                     .fill(t::SURFACE)
-                    .stroke(Stroke::new(1.0, t::alpha(t::SKY, 0.35)))
+                    .stroke(Stroke::new(1.0_f32, t::alpha(t::SKY, 0.35)))
                     .rounding(t::card_rounding())
                     .inner_margin(egui::Margin::symmetric(26.0, 22.0))
                     .show(ui, |ui| {
@@ -2081,7 +2116,7 @@ impl App {
             .frame(
                 egui::Frame::none()
                     .fill(t::SURFACE)
-                    .stroke(Stroke::new(1.0, t::alpha(t::SKY, 0.35)))
+                    .stroke(Stroke::new(1.0_f32, t::alpha(t::SKY, 0.35)))
                     .rounding(t::card_rounding())
                     .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
             )
@@ -2113,6 +2148,33 @@ impl App {
 
 // ------------------------------------------------------------------- app ----
 
+/// What the user meant by dropping this.
+///
+/// Dropping is the fastest way into the product, and it used to have exactly
+/// one interpretation: everything was treated as a capsule to run, so dropping
+/// a folder you wanted to protect jumped to the Run step and told you it was
+/// not a capsule. The gesture is the same; the intent is not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DropIntent {
+    /// A `.nyarch` file: the user wants to open it.
+    RunCapsule,
+    /// Anything else: the user wants to protect it.
+    ProtectSource,
+}
+
+/// Decide from the path alone, so the routing is testable without a window.
+pub fn drop_intent(path: &std::path::Path) -> DropIntent {
+    let is_capsule = path
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("nyarch"))
+        .unwrap_or(false);
+    if is_capsule {
+        DropIntent::RunCapsule
+    } else {
+        DropIntent::ProtectSource
+    }
+}
+
 impl App {
     fn handle_drops(&mut self, ctx: &egui::Context, now: f64) {
         let dropped: Vec<std::path::PathBuf> =
@@ -2120,21 +2182,40 @@ impl App {
         if dropped.is_empty() {
             return;
         }
-        self.goto(Step::Run, now);
         for path in dropped {
-            match nyedarch_core::launch::validate(&path) {
-                Ok(()) => {
-                    self.run_status.clear();
-                    self.run_ok = false;
-                    self.toast(now, "Capsule ready", t::SKY);
-                    self.say(now, format!("Loaded {}", path.display()));
-                    self.dropped_capsule = Some(path);
+            match drop_intent(&path) {
+                DropIntent::RunCapsule => {
+                    self.goto(Step::Run, now);
+                    match nyedarch_core::launch::validate(&path) {
+                        Ok(()) => {
+                            self.run_status.clear();
+                            self.run_ok = false;
+                            self.toast(now, "Capsule ready", t::SKY);
+                            self.say(now, format!("Loaded {}", path.display()));
+                            self.dropped_capsule = Some(path);
+                        }
+                        Err(e) => {
+                            self.dropped_capsule = None;
+                            self.run_ok = false;
+                            self.run_status = format!("Cannot run that capsule: {e}");
+                            self.toast(now, "Capsule refused", t::ROSE);
+                        }
+                    }
                 }
-                Err(e) => {
-                    self.dropped_capsule = None;
-                    self.run_ok = false;
-                    self.run_status = format!("Cannot run that file: {e}");
-                    self.toast(now, "Not a capsule", t::ROSE);
+                DropIntent::ProtectSource => {
+                    // A folder or an ordinary file is something to protect, not
+                    // something to open. Sending it to Run and calling it "not a
+                    // capsule" answered a question the user had not asked.
+                    self.goto(Step::Source, now);
+                    self.source_path = path.to_string_lossy().to_string();
+                    self.toast(now, "Ready to protect", t::SKY);
+                    self.say(
+                        now,
+                        format!(
+                            "Protecting {} - drop a .nyarch capsule instead to open one",
+                            path.display()
+                        ),
+                    );
                 }
             }
         }
@@ -2196,7 +2277,7 @@ impl App {
             rect,
             t::card_rounding(),
             t::alpha(t::SUNKEN, 0.97 * fade),
-            Stroke::new(1.0, t::alpha(colour, 0.85 * fade)),
+            Stroke::new(1.0_f32, t::alpha(colour, 0.85 * fade)),
         );
         painter.circle_filled(pos2(rect.left() + 20.0, rect.center().y), 5.0, t::alpha(colour, fade));
         painter.text(
@@ -2229,6 +2310,14 @@ impl eframe::App for App {
 
         self.poll_build(now);
 
+        // Diagnostics produced on the worker thread, drained into the log the
+        // user is actually looking at.
+        if self.with_logs {
+            for line in nyedarch_buildtool::logging::drain() {
+                self.log.push((now, line));
+            }
+        }
+
         self.menu_bar(ctx, now);
         self.rail(ctx, now);
 
@@ -2237,9 +2326,73 @@ impl eframe::App for App {
             .show(ctx, |ui| {
                 let full = ui.max_rect();
 
+                // The capsule stands beside the work, always.
+                //
+                // It used to live at the bottom of a sidebar, below six
+                // navigation items - the thing being built, filed under
+                // furniture. Here it is a standing object the whole session
+                // happens next to, and it locks shut as the work proceeds.
+                let stage_w = 268.0_f32.min(full.width() * 0.30);
+                let stage = Rect::from_min_size(
+                    full.min + vec2(6.0, 10.0),
+                    vec2(stage_w, full.height() - 20.0),
+                );
+                let mut stage_ui =
+                    ui.child_ui(stage, egui::Layout::top_down(egui::Align::Center));
+                stage_ui.add_space((stage.height() * 0.24).min(120.0));
+                let ring_clicked = w::vault_core(
+                    &mut stage_ui,
+                    stage_w.min(236.0),
+                    [
+                        true, // machine: mandatory, always engaged
+                        self.passphrase_acceptable(),
+                        self.protections.location,
+                        self.protections.time,
+                    ],
+                    self.build_progress,
+                    self.building,
+                    now,
+                );
+
+                // Clicking a ring goes to the protection it names, and toggles
+                // the optional ones straight from the object. The two mandatory
+                // rings only navigate: they cannot be switched off, and a
+                // control that silently ignores a click is worse than one that
+                // is obviously fixed.
+                if let Some(ring) = ring_clicked {
+                    self.goto(Step::Protections, now);
+                    match ring {
+                        2 => {
+                            self.protections.location = !self.protections.location;
+                            let on = self.protections.location;
+                            self.say(now, if on { "Location protection on." } else { "Location protection off." });
+                        }
+                        3 => {
+                            self.protections.time = !self.protections.time;
+                            let on = self.protections.time;
+                            self.say(now, if on { "Time window on." } else { "Time window off." });
+                        }
+                        _ => self.say(now, "That protection is always on and cannot be disabled."),
+                    }
+                }
+
+                // A hairline between the object and the work, so the eye knows
+                // they are two things rather than one crowded column.
+                ui.painter().line_segment(
+                    [
+                        pos2(stage.right() + 14.0, full.top() + 18.0),
+                        pos2(stage.right() + 14.0, full.bottom() - 18.0),
+                    ],
+                    Stroke::new(1.0_f32, t::LINE),
+                );
+
                 let since = (now - self.step_changed_at) as f32;
                 let e = t::ease_out_cubic((since / 0.30).clamp(0.0, 1.0));
-                let content = full.shrink2(vec2(30.0, 22.0)).translate(vec2(0.0, (1.0 - e) * 16.0));
+                let content = Rect::from_min_max(
+                    pos2(stage.right() + 34.0, full.top() + 22.0),
+                    pos2(full.right() - 30.0, full.bottom() - 22.0),
+                )
+                .translate(vec2(0.0, (1.0 - e) * 16.0));
                 let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::Min));
                 child.set_opacity(e);
 
@@ -2330,4 +2483,88 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("NYEDArch", opts, Box::new(|_cc| Box::<App>::default()))
+}
+
+#[cfg(test)]
+mod guard_tests {
+    /// The work must refuse what the button merely hides.
+    ///
+    /// `ready_to_build` decides whether the control can be pressed. It was the
+    /// only check, and the spine now lets someone reach the Build stage from
+    /// anywhere, so the conditions are enforced where the work starts too. This
+    /// pins that, because the failure mode is silent: a future caller inherits
+    /// no check and nothing looks wrong.
+    #[test]
+    fn start_build_checks_its_own_preconditions() {
+        let src = include_str!("main.rs");
+        let body = src
+            .split("fn start_build(&mut self, now: f64) {")
+            .nth(1)
+            .expect("start_build exists");
+        // Only the opening of the function matters: the guards come first.
+        let head = &body[..body.len().min(1400)];
+        for required in [
+            "self.source_path.trim().is_empty()",
+            "!self.passphrase_acceptable()",
+            "self.target_windows || self.target_macos || self.target_linux",
+        ] {
+            assert!(
+                head.contains(required),
+                "start_build must check `{required}` itself, not rely on the button"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::{drop_intent, DropIntent};
+    use std::path::Path;
+
+    /// A capsule is opened; everything else is protected.
+    ///
+    /// Every drop used to be treated as a capsule, so dropping a folder you
+    /// wanted to protect landed on the Run step and was told it was not a
+    /// capsule - an answer to a question the user had not asked.
+    #[test]
+    fn capsules_are_opened_and_everything_else_is_protected() {
+        for capsule in [
+            "/tmp/reports.nyarch",
+            "/tmp/Reports.NYARCH",
+            "C:\\Users\\me\\Desktop\\payroll.nyarch",
+        ] {
+            assert_eq!(
+                drop_intent(Path::new(capsule)),
+                DropIntent::RunCapsule,
+                "{capsule} should open"
+            );
+        }
+
+        for source in [
+            "/tmp/reports",             // a folder
+            "/tmp/report.pdf",
+            "/tmp/archive.zip",
+            "/tmp/notes.txt",
+            "/tmp/nyarch",              // a folder merely named like one
+            "/tmp/capsule.nyarch.bak",  // not the capsule extension
+        ] {
+            assert_eq!(
+                drop_intent(Path::new(source)),
+                DropIntent::ProtectSource,
+                "{source} should be protected, not opened"
+            );
+        }
+    }
+
+    /// The extension match is case-insensitive but exact.
+    ///
+    /// A file merely containing "nyarch" in its name is not a capsule, and
+    /// treating it as one would send the user to a refusal instead of the step
+    /// they wanted.
+    #[test]
+    fn only_the_real_extension_counts() {
+        assert_eq!(drop_intent(Path::new("/x/a.nyarchive")), DropIntent::ProtectSource);
+        assert_eq!(drop_intent(Path::new("/x/nyarch.txt")), DropIntent::ProtectSource);
+        assert_eq!(drop_intent(Path::new("/x/a.NyArch")), DropIntent::RunCapsule);
+    }
 }

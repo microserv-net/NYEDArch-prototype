@@ -12,6 +12,7 @@ pub mod eula;
 pub mod generator;
 pub mod harden;
 pub mod keystore;
+pub mod logging;
 pub mod machines;
 pub mod pipeline;
 pub mod remote;

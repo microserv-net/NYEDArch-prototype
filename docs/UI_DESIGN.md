@@ -64,6 +64,62 @@ rather than by adding a warning icon and a paragraph:
 An unselected card stays plain white, so the interface is calm until something
 actually warrants attention.
 
+## Layout: a spine and a standing object
+
+There is no sidebar. A vertical list of numbered steps down the left edge is
+what every settings window looks like, and it spent a fifth of the screen saying
+where you were rather than showing you anything.
+
+Instead:
+
+* **The stage spine** runs across the top — a chain of nodes with a light
+  travelling along the completed section, in the same direction as the perimeter
+  pulse, so the window has one direction of travel rather than two competing
+  ones. Only the active stage shows its hint, so the row stays quiet.
+* **The capsule stands beside the work**, full height, for the whole session. It
+  used to sit at the bottom of the sidebar beneath six navigation items — the
+  thing being built, filed under furniture.
+* **The work takes the rest**, with a hairline between object and controls so the
+  eye reads two things rather than one crowded column.
+
+The result is a console rather than a form: you are always looking at the thing
+you are making, and it is visibly changing as you configure it.
+
+## The vault core
+
+The centrepiece, and the reason this does not read as a settings form.
+
+A security tool that looks like a preferences pane teaches people to treat it
+like one. Here the thing being built is on screen the whole time: four rings
+orbit a core, one per protection, and each **snaps into place** when that
+protection engages. The core's iris closes as the build completes.
+
+Nothing on it is decorative:
+
+| Element | Meaning |
+|---|---|
+| Ring locked and bright | That protection is engaged |
+| Ring drifting and faint | Available, not engaged |
+| Lug seated into the bezel | The moment a protection takes hold |
+| Iris closed | Sealed |
+| Spin rate | Idle, working, or done |
+| Violet sweep | A build is running |
+
+**The rings are the navigation.** Pointing at one names it and what state it is
+in; clicking it goes to that protection, and toggles the optional ones straight
+from the object. The two mandatory rings only navigate - they cannot be switched
+off, and a control that silently ignores a click is worse than one that is
+obviously fixed.
+
+Making the reader of state also the control for it removes a layer of
+indirection: you point at the thing you mean.
+
+It leans very slightly toward the pointer, which is enough to feel like an object
+rather than a printed diagram, and not enough to distract.
+
+It replaced a segmented ring that counted protections. A count is a number you
+read; a lock closing is something you watch happen.
+
 ## Controls are drawn, not themed
 
 Recolouring a stock control leaves it looking stock. Text fields, sliders and
@@ -91,6 +147,26 @@ looking like filled boxes with outlines.
 It is 30 px, shares the rail's surface colour, and has **no rule beneath it**. A
 hairline there cut the window in two and left a visible seam; without it the top
 of the window reads as one continuous plane with the content floating on it.
+
+## What is verified, and what is not
+
+Screenshots in `docs/ui` come from the running client under a headless X server.
+That catches layout, colour and contrast, and it caught several things review
+did not: rings too faint to invite a click, text clipped out of a card, a label
+repeated under the capsule.
+
+It does **not** exercise pointer behaviour reliably. A synthetic pointer does not
+always produce the motion events the toolkit reacts to, so the ring hover label
+and the ring click are covered by their logic and by a compile, not by a picture.
+They are listed here rather than left implied: a screenshot proves what it shows,
+and nothing more.
+
+Where that mattered, the logic was pulled out of the drawing code so it could be
+tested without a window: which ring a point selects is now a pure function, and
+testing it immediately found a defect no screenshot would have shown — the ring
+bands overlap, and "first match wins" handed a click to the innermost ring even
+when the pointer was four times closer to its neighbour. The nearer ring wins
+now, and a test sweeps every half-pixel between rings to prove it.
 
 ## Accessibility notes
 
